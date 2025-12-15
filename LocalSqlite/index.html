@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Serverless SQLite with CSV Sync</title>
+</head>
+<body>
+
+    <h1>Backendless SQLite + Local Backup</h1>
+    <p>
+        1. Click <b>Select Backup Folder</b> to grant write access.<br>
+        2. Click <b>Initialize/Restore</b> to load existing CSVs/Schema from that folder (if any).<br>
+        3. Run SQL. Any change will auto-save CSVs and Schema to the disk.
+    </p>
+
+    <!-- Controls -->
+    <div style="margin-bottom: 20px;">
+        <button id="btnSelectDir">1. Select Backup Folder</button>
+        <button id="btnRestore" disabled>2. Initialize / Restore from Folder</button>
+        <span id="status" style="margin-left: 10px; font-weight: bold; color: gray;">Waiting...</span>
+    </div>
+
+    <!-- SQL Interface -->
+    <textarea id="sqlInput" rows="5" cols="80" placeholder="ENTER SQL HERE (e.g., CREATE TABLE... or INSERT...)">
+CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
+INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+    </textarea>
+    <br>
+    <button id="btnRun" disabled>Run SQL</button>
+
+    <!-- Output -->
+    <h3>Results / Logs:</h3>
+    <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
+
+    <script type="module">
+        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite-async.mjs';
+        import { SQLite3 } from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite.mjs';
+
+        let sqlite3;
+        let db;
+        let dirHandle = null;
+        let isSaving = false;
+
+        // UI References
+        const btnSelectDir = document.getElementById('btnSelectDir');
+        const btnRestore = document.getElementById('btnRestore');
+        const btnRun = document.getElementById('btnRun');
+        const sqlInput = document.getElementById('sqlInput');
+        const output = document.getElementById('output');
+        const statusSpan = document.getElementById('status');
+
+        // --- 1. Initialization ---
+
+        async function initSQLite() {
+            log("Loading WebAssembly...");
+            const module = await SQLiteESMFactory();
+            sqlite3 = SQLite3.Factory(module);
+            
+            // Open a memory database. We rely on file sync for persistence.
+            db = await sqlite3.open_v2('my-db', 
+                sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE | sqlite3.OPEN_MEMORY
+            );
+            
+            log("SQLite ready in memory.");
+            
+            // Register a "Commit Hook". 
+            // This fires whenever a transaction is committed (Data changed).
+            // We use this to trigger the auto-save.
+            sqlite3.register_commit_hook(db, () => {
+                // Return 0 to allow the commit.
+                // We trigger the backup asynchronously so we don't block the UI.
+                debounceBackup(); 
+                return 0; 
+            });
+        }
+
+        // --- 2. File System Access API ---
+
+        btnSelectDir.addEventListener('click', async () => {
+            try {
+                // Request access to a folder
+                dirHandle = await window.showDirectoryPicker();
+                log(`Selected directory: ${dirHandle.name}`);
+                btnRestore.disabled = false;
+                statusSpan.textContent = "Folder Linked.";
+                statusSpan.style.color = "blue";
+            } catch (err) {
+                log("Error selecting directory: " + err.message);
+            }
+        });
+
+        btnRestore.addEventListener('click', async () => {
+            if (!dirHandle) return;
+            statusSpan.textContent = "Restoring...";
+            await restoreDatabase();
+            btnRun.disabled = false;
+            statusSpan.textContent = "Ready.";
+            statusSpan.style.color = "green";
+        });
+
+        // --- 3. Database Operations ---
+
+        btnRun.addEventListener('click', async () => {
+            const sql = sqlInput.value;
+            try {
+                const results = [];
+                // wa-sqlite creates an async iterator for results
+                for await (const stmt of sqlite3.statements(db, sql)) {
+                    // Execute
+                    let columns = [];
+                    const rows = [];
+                    while (await sqlite3.step(db, stmt) === sqlite3.ROW) {
+                        columns = sqlite3.column_names(stmt);
+                        rows.push(sqlite3.row(stmt));
+                    }
+                    if(columns.length > 0) {
+                        results.push({ columns, rows });
+                    }
+                }
+                
+                // Display results
+                if (results.length === 0) {
+                    log("Query executed successfully (No output rows).");
+                } else {
+                    log(JSON.stringify(results, null, 2));
+                }
+
+            } catch (err) {
+                log("SQL Error: " + err.message);
+            }
+        });
+
+        // --- 4. Backup Logic (Export to CSV + Schema) ---
+
+        // Debounce to prevent saving 100 times if 100 inserts happen quickly
+        let debounceTimer;
+        function debounceBackup() {
+            if (debounceTimer) clearTimeout(debounceTimer);
+            statusSpan.textContent = "Changes detected. Pending save...";
+            debounceTimer = setTimeout(() => {
+                performBackup();
+            }, 1000); // Wait 1 second after last change
+        }
+
+        async function performBackup() {
+            if (!dirHandle) {
+                log("Warning: DB changed but no folder selected for backup.");
+                return;
+            }
+            
+            statusSpan.textContent = "Saving to disk...";
+            
+            try {
+                // A. Save Schema (The structure)
+                // We get the SQL required to recreate tables
+                const schemaResults = await runQuery("SELECT sql, name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+                
+                let fullSchemaSql = "";
+                const tablesToSave = [];
+
+                for(const row of schemaResults.rows) {
+                    const createSql = row[0];
+                    const tableName = row[1];
+                    fullSchemaSql += createSql + ";\n";
+                    tablesToSave.push(tableName);
+                }
+
+                await writeFile('schema.sql', fullSchemaSql);
+
+                // B. Save Data (The CSVs)
+                for (const tableName of tablesToSave) {
+                    const data = await runQuery(`SELECT * FROM "${tableName}"`);
+                    const csvContent = convertToCSV(data.columns, data.rows);
+                    await writeFile(`${tableName}.csv`, csvContent);
+                }
+
+                statusSpan.textContent = "Saved @ " + new Date().toLocaleTimeString();
+                log("Auto-saved backup complete.");
+            } catch (err) {
+                console.error(err);
+                statusSpan.textContent = "Save Failed!";
+                log("Save failed: " + err.message);
+            }
+        }
+
+        // --- 5. Restore Logic (Import) ---
+
+        async function restoreDatabase() {
+            if (!dirHandle) return;
+
+            try {
+                // A. Load Schema
+                let schemaFile;
+                try {
+                    schemaFile = await dirHandle.getFileHandle('schema.sql');
+                } catch(e) {
+                    log("No schema.sql found. Starting fresh.");
+                    return;
+                }
+
+                const file = await schemaFile.getFile();
+                const schemaSql = await file.text();
+
+                // Reset DB logic could go here, but since we are in memory,
+                // we usually just run this on load. To be safe, we could drop all tables first.
+                // For this demo, we assume the user clicked Restore on a fresh load.
+                
+                await runExec(schemaSql);
+                log("Schema restored.");
+
+                // B. Load CSVs
+                // We scan the directory for .csv files
+                for await (const [name, handle] of dirHandle.entries()) {
+                    if (name.endsWith('.csv')) {
+                        const tableName = name.replace('.csv', '');
+                        const csvFile = await handle.getFile();
+                        const csvText = await csvFile.text();
+                        
+                        await importCSV(tableName, csvText);
+                        log(`Table '${tableName}' restored from CSV.`);
+                    }
+                }
+
+            } catch (err) {
+                log("Restore Error: " + err.message);
+                console.error(err);
+            }
+        }
+
+        // --- Helpers ---
+
+        async function writeFile(filename, content) {
+            const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+        }
+
+        async function runQuery(sql) {
+            let columns = [];
+            const rows = [];
+            for await (const stmt of sqlite3.statements(db, sql)) {
+                while (await sqlite3.step(db, stmt) === sqlite3.ROW) {
+                    if (columns.length === 0) columns = sqlite3.column_names(stmt);
+                    rows.push(sqlite3.row(stmt));
+                }
+            }
+            return { columns, rows };
+        }
+
+        async function runExec(sql) {
+            for await (const stmt of sqlite3.statements(db, sql)) {
+                await sqlite3.step(db, stmt);
+            }
+        }
+
+        function convertToCSV(columns, rows) {
+            // Helper to escape CSV values (wrap in quotes if contains comma or quote)
+            const escape = (val) => {
+                if (val === null) return "";
+                const str = String(val);
+                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
+                    return `"${str.replace(/"/g, '""')}"`;
+                }
+                return str;
+            };
+
+            const header = columns.map(escape).join(',');
+            const body = rows.map(row => row.map(escape).join(',')).join('\n');
+            return header + '\n' + body;
+        }
+
+        async function importCSV(tableName, csvText) {
+            // Very basic CSV parser. 
+            // Note: A robust parser is complex. This assumes standard CSV format.
+            const lines = csvText.trim().split('\n');
+            if (lines.length < 2) return; // Empty or just header
+
+            // Parse Header to ensure column mapping
+            // (We assume the CSV header matches DB column names)
+            
+            // Simple split (won't handle newlines inside quotes correctly, but enough for demo)
+            // For production, use a library like PapaParse.
+            const rows = lines.map(line => {
+                // Regex to split by comma, ignoring commas inside quotes
+                const matches = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
+                return matches ? matches.map(m => {
+                    // Remove surrounding quotes and unescape double quotes
+                    if (m.startsWith('"') && m.endsWith('"')) {
+                        return m.slice(1, -1).replace(/""/g, '"');
+                    }
+                    return m;
+                }) : [];
+            });
+
+            // Remove header
+            rows.shift(); 
+
+            // Construct INSERT statements
+            // We use parameters (?) for safety, though we are building the query string manually here
+            // because `wa-sqlite` binding is slightly verbose for bulk insert in this simple demo.
+            
+            await runExec("BEGIN TRANSACTION;");
+            
+            for(const row of rows) {
+                if(row.length === 0) continue;
+                
+                const placeholders = row.map(() => '?').join(',');
+                const sql = `INSERT INTO "${tableName}" VALUES (${placeholders})`;
+                
+                // Bind and execute
+                for await (const stmt of sqlite3.statements(db, sql)) {
+                    row.forEach((val, idx) => {
+                        sqlite3.bind_collection(stmt, { [idx + 1]: val });
+                    });
+                    await sqlite3.step(db, stmt);
+                }
+            }
+            
+            await runExec("COMMIT;");
+        }
+
+        function log(msg) {
+            output.textContent += msg + "\n";
+            output.scrollTop = output.scrollHeight;
+        }
+
+        // Initialize on load
+        initSQLite();
+
+    </script>
+</body>
+</html>
