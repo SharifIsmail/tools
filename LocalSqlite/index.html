@@ -34,8 +34,8 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
     <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
 
     <script type="module">
-        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite-async.mjs';
-        import { SQLite3 } from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite.mjs';
+        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite-async.wasm.js';
+        import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite.mjs';
 
         let sqlite3;
         let db;
@@ -55,11 +55,11 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         async function initSQLite() {
             log("Loading WebAssembly...");
             const module = await SQLiteESMFactory();
-            sqlite3 = SQLite3.Factory(module);
+            sqlite3 = SQLite.Factory(module);
             
             // Open a memory database. We rely on file sync for persistence.
             db = await sqlite3.open_v2('my-db', 
-                sqlite3.OPEN_READWRITE | sqlite3.OPEN_CREATE | sqlite3.OPEN_MEMORY
+                SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_MEMORY
             );
             
             log("SQLite ready in memory.");
@@ -110,7 +110,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                     // Execute
                     let columns = [];
                     const rows = [];
-                    while (await sqlite3.step(db, stmt) === sqlite3.ROW) {
+                    while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
                         columns = sqlite3.column_names(stmt);
                         rows.push(sqlite3.row(stmt));
                     }
@@ -241,7 +241,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             let columns = [];
             const rows = [];
             for await (const stmt of sqlite3.statements(db, sql)) {
-                while (await sqlite3.step(db, stmt) === sqlite3.ROW) {
+                while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
                     if (columns.length === 0) columns = sqlite3.column_names(stmt);
                     rows.push(sqlite3.row(stmt));
                 }
@@ -251,7 +251,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
         async function runExec(sql) {
             for await (const stmt of sqlite3.statements(db, sql)) {
-                await sqlite3.step(db, stmt);
+                await sqlite3.step(stmt);
             }
         }
 
@@ -312,9 +312,9 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                 // Bind and execute
                 for await (const stmt of sqlite3.statements(db, sql)) {
                     row.forEach((val, idx) => {
-                        sqlite3.bind_collection(stmt, { [idx + 1]: val });
+                        sqlite3.bind(stmt, idx + 1, val);
                     });
-                    await sqlite3.step(db, stmt);
+                    await sqlite3.step(stmt);
                 }
             }
             
