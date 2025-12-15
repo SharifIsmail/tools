@@ -34,8 +34,8 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
     <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
 
     <script type="module">
-        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite-async.wasm.js';
-        import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@0.9.14/dist/wa-sqlite.mjs';
+        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite-async.mjs';
+        import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/src/sqlite-api.js';
 
         let sqlite3;
         let db;
@@ -63,15 +63,11 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             );
             
             log("SQLite ready in memory.");
+            btnRun.disabled = false;
             
-            // Register a "Commit Hook". 
-            // This fires whenever a transaction is committed (Data changed).
-            // We use this to trigger the auto-save.
-            sqlite3.register_commit_hook(db, () => {
-                // Return 0 to allow the commit.
-                // We trigger the backup asynchronously so we don't block the UI.
-                debounceBackup(); 
-                return 0; 
+            // Register an update hook to detect data changes and trigger auto-save.
+            sqlite3.update_hook(db, () => {
+                debounceBackup();
             });
         }
 
