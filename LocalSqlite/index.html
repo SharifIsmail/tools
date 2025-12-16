@@ -337,22 +337,26 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             );
 
             await runExec("BEGIN TRANSACTION;");
+            try {
+                for (const record of dataRows) {
+                    const values = columns.map(col => record[col] ?? null);
+                    const placeholders = columns.map(() => '?').join(',');
+                    const columnList = columns.map(col => `"${col}"`).join(',');
+                    const sql = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})`;
 
-            for (const record of dataRows) {
-                const values = columns.map(col => record[col] ?? null);
-                const placeholders = columns.map(() => '?').join(',');
-                const columnList = columns.map(col => `"${col}"`).join(',');
-                const sql = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})`;
-
-                for await (const stmt of sqlite3.statements(db, sql)) {
-                    values.forEach((val, idx) => {
-                        sqlite3.bind(stmt, idx + 1, val);
-                    });
-                    await sqlite3.step(stmt);
+                    for await (const stmt of sqlite3.statements(db, sql)) {
+                        values.forEach((val, idx) => {
+                            sqlite3.bind(stmt, idx + 1, val);
+                        });
+                        await sqlite3.step(stmt);
+                    }
                 }
-            }
 
-            await runExec("COMMIT;");
+                await runExec("COMMIT;");
+            } catch (err) {
+                await runExec("ROLLBACK;");
+                throw err;
+            }
         }
 
         function log(msg) {
