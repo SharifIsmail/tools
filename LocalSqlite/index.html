@@ -188,11 +188,16 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             if (isTestMode && typeof testOverrides.performBackup === 'function') {
                 return testOverrides.performBackup();
             }
+            if (isSaving) {
+                log("Backup already in progress. Skipping concurrent run.");
+                return;
+            }
             if (!dirHandle) {
                 log("Warning: DB changed but no folder selected for backup.");
                 return;
             }
             
+            isSaving = true;
             statusSpan.textContent = "Saving to disk...";
             
             try {
@@ -225,6 +230,8 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                 console.error(err);
                 statusSpan.textContent = "Save Failed!";
                 log("Save failed: " + err.message);
+            } finally {
+                isSaving = false;
             }
         }
 
