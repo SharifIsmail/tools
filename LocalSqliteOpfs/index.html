@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>OPFS-backed SQLite Console</title>
+    <title>Serverless SQLite with CSV Sync</title>
     <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
     <style>
         #qunit,
@@ -18,19 +18,21 @@
         }
     </style>
 </head>
-<body>
+<body>  
 
-    <h1>SQLite + OPFS Persistence</h1>
+    <h1>Backendless SQLite + Local Backup</h1>
     <p>
-        1. Click <b>Initialize OPFS Storage</b> to grant access and restore the on-disk <code>.sqlite</code> file.<br>
-        2. Run SQL. All changes write directly into the OPFS-backed database file.
+        1. Click <b>Select Backup Folder</b> to grant write access and automatically restore any CSVs/Schema stored there.<br>
+        2. Run SQL. Any change will auto-save CSVs and Schema to the disk.
     </p>
 
+    <!-- Controls -->
     <div style="margin-bottom: 20px;">
-        <button id="btnSelectDir">1. Initialize OPFS Storage</button>
-        <span id="status" style="margin-left: 10px; font-weight: bold; color: gray;">Waiting for OPFS init...</span>
+        <button id="btnSelectDir">1. Select Backup Folder</button>
+        <span id="status" style="margin-left: 10px; font-weight: bold; color: gray;">Waiting...</span>
     </div>
 
+    <!-- SQL Interface -->
     <textarea id="sqlInput" rows="5" cols="80" placeholder="ENTER SQL HERE (e.g., CREATE TABLE... or INSERT...)">
 CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
 INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
@@ -38,6 +40,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
     <br>
     <button id="btnRun" disabled>Run SQL</button>
 
+    <!-- Output -->
     <h3>Results / Logs:</h3>
     <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
 
@@ -48,16 +51,24 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
     <script type="module">
         import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite-async.mjs';
         import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/src/sqlite-api.js';
-        import { OPFSAnyContextVFS } from 'https://cdn.jsdelivr.net/gh/rhashimoto/wa-sqlite@master/src/examples/OPFSAnyContextVFS.js';
+        import Papa from 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/+esm';
 
-        const DB_PATH = '/wa-sqlite/local-db.sqlite';
-        const VFS_NAME = 'opfs-any-context';
+        const DB_PATH = '/opfs-local/my-db.sqlite';
+        const VFS_NAME = 'opfs-adaptive';
+        const OPEN_FLAGS = SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE;
+        const OPFS_ADAPTIVE_VFS_URL = 'https://cdn.jsdelivr.net/gh/rhashimoto/wa-sqlite@master/src/examples/OPFSAdaptiveVFS.js';
+
         let sqlite3;
-        let wasmModule;
         let db;
+        let dirHandle = null;
+        let isSaving = false;
+        let wasmModule = null;
         let vfsRegistered = false;
         let initPromise = null;
+        let opfsAdaptiveVFSPromise = null;
+        let opfsUnsupportedReason = null;
 
+        // UI References
         const btnSelectDir = document.getElementById('btnSelectDir');
         const btnRun = document.getElementById('btnRun');
         const sqlInput = document.getElementById('sqlInput');
@@ -66,12 +77,433 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         const urlParams = new URLSearchParams(window.location.search);
         const isTestMode = urlParams.get('test') === 'true';
         const testOverrides = Object.create(null);
+        const schemaMutationRegex = /\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b/i;
 
-        const OPEN_FLAGS = SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE;
+        const containsSchemaMutation = sql => schemaMutationRegex.test(sql);
+        const escapeIdentifier = identifier => `"${String(identifier).replace(/"/g, '""')}"`;
 
-        function setStatus(message, color = 'gray') {
-            statusSpan.textContent = message;
-            statusSpan.style.color = color;
+        function collectMissingOpfsApis() {
+            const missing = [];
+            if (typeof navigator === 'undefined' || !navigator.storage || typeof navigator.storage.getDirectory !== 'function') {
+                missing.push('navigator.storage.getDirectory');
+            }
+            if (typeof window === 'undefined' || typeof window.showDirectoryPicker !== 'function') {
+                missing.push('window.showDirectoryPicker');
+            }
+            if (typeof globalThis.FileSystemSyncAccessHandle === 'undefined') {
+                missing.push('FileSystemSyncAccessHandle');
+            }
+            return missing;
+        }
+
+        function broadcastOpfsUnsupported(message) {
+            statusSpan.textContent = 'OPFS Unsupported';
+            statusSpan.style.color = 'red';
+            log(message);
+            opfsUnsupportedReason = message;
+        }
+
+        async function loadOPFSAdaptiveVFS() {
+            if (opfsUnsupportedReason) {
+                return null;
+            }
+            const missing = collectMissingOpfsApis();
+            if (missing.length) {
+                const details = 'OPFS persistence requires modern Chromium-based browsers. Missing: ' + missing.join(', ') + '. Enable chrome://flags/#enable-experimental-web-platform-features or use Chrome 109+.';
+                broadcastOpfsUnsupported(details);
+                return null;
+            }
+            if (!opfsAdaptiveVFSPromise) {
+                opfsAdaptiveVFSPromise = import(OPFS_ADAPTIVE_VFS_URL).catch(err => {
+                    opfsAdaptiveVFSPromise = null;
+                    throw err;
+                });
+            }
+            const module = await opfsAdaptiveVFSPromise;
+            return module.OPFSAdaptiveVFS;
+        }
+
+        // --- 1. Initialization ---
+
+        async function initSQLite() {
+            if (db) return db;
+            if (initPromise) return initPromise;
+
+            initPromise = (async () => {
+                if (isTestMode) {
+                    if (!db) {
+                        db = {};
+                    }
+                    return db;
+                }
+
+                log('Loading WebAssembly + registering OPFSAdaptiveVFS...');
+                if (!sqlite3) {
+                    wasmModule = await SQLiteESMFactory();
+                    sqlite3 = SQLite.Factory(wasmModule);
+                }
+
+                if (!vfsRegistered) {
+                    const OPFSAdaptiveVFS = await loadOPFSAdaptiveVFS();
+                    if (OPFSAdaptiveVFS) {
+                        const vfs = await OPFSAdaptiveVFS.create(VFS_NAME, wasmModule);
+                        sqlite3.vfs_register(vfs, true);
+                        vfsRegistered = true;
+                    }
+                }
+
+                if (vfsRegistered) {
+                    db = await sqlite3.open_v2(DB_PATH, OPEN_FLAGS, VFS_NAME);
+                } else {
+                    const MEM_URI = 'file:memdb?mode=memory&cache=shared';
+                    const MEM_FLAGS = OPEN_FLAGS | SQLite.SQLITE_OPEN_URI;
+                    db = await sqlite3.open_v2(MEM_URI, MEM_FLAGS);
+                    if (!opfsUnsupportedReason) {
+                        log('OPFS module unavailable. Using in-memory SQLite (changes persist only for this tab).');
+                    }
+                }
+                btnRun.disabled = false;
+
+                sqlite3.update_hook(db, () => {
+                    debounceBackup();
+                });
+
+                log('SQLite ready via OPFSAdaptiveVFS.');
+                return db;
+            })();
+
+            try {
+                return await initPromise;
+            } catch (err) {
+                log('SQLite init failed: ' + err.message);
+                throw err;
+            } finally {
+                initPromise = null;
+            }
+        }
+
+        // --- 2. File System Access API ---
+
+        btnSelectDir.addEventListener('click', async () => {
+            try {
+                await initSQLite();
+                const handle = await window.showDirectoryPicker();
+                await linkDirectory(handle);
+            } catch (err) {
+                log('Error selecting directory: ' + err.message);
+            }
+        });
+
+        async function linkDirectory(handle) {
+            if (!handle) return;
+            dirHandle = handle;
+            log(`Selected directory: ${dirHandle.name}`);
+            statusSpan.textContent = 'Restoring...';
+            statusSpan.style.color = 'orange';
+
+            try {
+                const restored = await restoreDatabase();
+                if (restored) {
+                    statusSpan.textContent = 'Ready.';
+                    statusSpan.style.color = 'green';
+                } else {
+                    statusSpan.textContent = 'Folder Linked. No prior backup.';
+                    statusSpan.style.color = 'blue';
+                }
+            } catch (err) {
+                statusSpan.textContent = 'Restore Failed.';
+                statusSpan.style.color = 'red';
+            }
+        }
+
+        // --- 3. Database Operations ---
+
+        btnRun.addEventListener('click', async () => {
+            const sql = sqlInput.value;
+            const schemaMutationRequested = containsSchemaMutation(sql);
+            try {
+                await initSQLite();
+                const results = [];
+                // wa-sqlite creates an async iterator for results
+                for await (const stmt of sqlite3.statements(db, sql)) {
+                    // Execute
+                    let columns = [];
+                    const rows = [];
+                    while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+                        columns = sqlite3.column_names(stmt);
+                        rows.push(sqlite3.row(stmt));
+                    }
+                    if(columns.length > 0) {
+                        results.push({ columns, rows });
+                    }
+                }
+                
+                // Display results
+                if (results.length === 0) {
+                    log('Query executed successfully (No output rows).');
+                } else {
+                    log(JSON.stringify(results, null, 2));
+                }
+
+                if (schemaMutationRequested) {
+                    debounceBackup();
+                }
+
+            } catch (err) {
+                log('SQL Error: ' + err.message);
+            }
+        });
+
+        // --- 4. Backup Logic (Export to CSV + Schema) ---
+
+        const scheduleDebounce = callback => {
+            if (isTestMode && typeof testOverrides.scheduleDebounce === 'function') {
+                return testOverrides.scheduleDebounce(callback);
+            }
+            return window.setTimeout(callback, 1000);
+        };
+
+        const cancelDebounceHandle = handle => {
+            if (!handle) return;
+            if (isTestMode && typeof testOverrides.cancelDebounce === 'function') {
+                return testOverrides.cancelDebounce(handle);
+            }
+            clearTimeout(handle);
+        };
+
+        // Debounce to prevent saving 100 times if 100 inserts happen quickly
+        let debounceTimer;
+        function debounceBackup() {
+            if (debounceTimer) cancelDebounceHandle(debounceTimer);
+            statusSpan.textContent = 'Changes detected. Pending save...';
+            debounceTimer = scheduleDebounce(() => {
+                performBackup();
+            });
+        }
+
+        async function performBackup() {
+            if (isTestMode && typeof testOverrides.performBackup === 'function') {
+                return testOverrides.performBackup();
+            }
+            if (isSaving) {
+                log('Backup already in progress. Skipping concurrent run.');
+                return;
+            }
+            if (!dirHandle) {
+                log('Warning: DB changed but no folder selected for backup.');
+                return;
+            }
+            
+            isSaving = true;
+            statusSpan.textContent = 'Saving to disk...';
+            
+            try {
+                // A. Save Schema (The structure)
+                // We get the SQL required to recreate tables
+                const schemaResults = await runQuery("SELECT sql, name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'");
+                
+                let fullSchemaSql = '';
+                const tablesToSave = [];
+
+                for(const row of schemaResults.rows) {
+                    const createSql = row[0];
+                    const tableName = row[1];
+                    fullSchemaSql += createSql + ';\n';
+                    tablesToSave.push(tableName);
+                }
+
+                await writeFile('schema.sql', fullSchemaSql);
+
+                // B. Save Data (The CSVs)
+                for (const tableName of tablesToSave) {
+                    const data = await runQuery(`SELECT * FROM "${tableName}"`);
+                    const csvContent = convertToCSV(data.columns, data.rows);
+                    await writeFile(`${tableName}.csv`, csvContent);
+                }
+
+                statusSpan.textContent = 'Saved @ ' + new Date().toLocaleTimeString();
+                log('Auto-saved backup complete.');
+            } catch (err) {
+                console.error(err);
+                statusSpan.textContent = 'Save Failed!';
+                log('Save failed: ' + err.message);
+            } finally {
+                isSaving = false;
+            }
+        }
+
+        // --- 5. Restore Logic (Import) ---
+
+        async function restoreDatabase() {
+            if (!dirHandle) return false;
+
+            if (!isTestMode) {
+                await initSQLite();
+                await resetDatabase();
+            }
+
+            try {
+                // A. Load Schema
+                let schemaFile;
+                try {
+                    schemaFile = await dirHandle.getFileHandle('schema.sql');
+                } catch(e) {
+                    log('No schema.sql found. Starting fresh.');
+                    return false;
+                }
+
+                const file = await schemaFile.getFile();
+                const schemaSql = await file.text();
+
+                await runExec(schemaSql);
+                log('Schema restored.');
+
+                // B. Load CSVs
+                // We scan the directory for .csv files
+                for await (const [name, handle] of dirHandle.entries()) {
+                    if (name.endsWith('.csv')) {
+                        const tableName = name.replace('.csv', '');
+                        const csvFile = await handle.getFile();
+                        const csvText = await csvFile.text();
+                        
+                        await importCSV(tableName, csvText);
+                        log(`Table '${tableName}' restored from CSV.`);
+                    }
+                }
+
+                return true;
+            } catch (err) {
+                log('Restore Error: ' + err.message);
+                console.error(err);
+                throw err;
+            }
+        }
+
+        async function resetDatabase() {
+            if (isTestMode && typeof testOverrides.resetDatabase === 'function') {
+                return testOverrides.resetDatabase();
+            }
+            if (isTestMode) return;
+            const objects = await runQuery("SELECT type, name FROM sqlite_master WHERE name NOT LIKE 'sqlite_%'");
+            for (const row of objects.rows) {
+                const type = row[0];
+                const name = row[1];
+                let dropSql = null;
+                switch (type) {
+                    case 'table':
+                        dropSql = `DROP TABLE IF EXISTS ${escapeIdentifier(name)}`;
+                        break;
+                    case 'index':
+                        dropSql = `DROP INDEX IF EXISTS ${escapeIdentifier(name)}`;
+                        break;
+                    case 'view':
+                        dropSql = `DROP VIEW IF EXISTS ${escapeIdentifier(name)}`;
+                        break;
+                    case 'trigger':
+                        dropSql = `DROP TRIGGER IF EXISTS ${escapeIdentifier(name)}`;
+                        break;
+                }
+                if (dropSql) {
+                    await runExec(dropSql);
+                }
+            }
+            await runExec('VACUUM;');
+        }
+
+        // --- Helpers ---
+
+        async function writeFile(filename, content) {
+            if (isTestMode && typeof testOverrides.writeFile === 'function') {
+                return testOverrides.writeFile(filename, content);
+            }
+            const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
+            const writable = await fileHandle.createWritable();
+            await writable.write(content);
+            await writable.close();
+        }
+
+        async function runQuery(sql) {
+            if (isTestMode && typeof testOverrides.runQuery === 'function') {
+                return testOverrides.runQuery(sql);
+            }
+            let columns = [];
+            const rows = [];
+            for await (const stmt of sqlite3.statements(db, sql)) {
+                while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+                    if (columns.length === 0) columns = sqlite3.column_names(stmt);
+                    rows.push(sqlite3.row(stmt));
+                }
+            }
+            return { columns, rows };
+        }
+
+        async function runExec(sql) {
+            if (isTestMode && typeof testOverrides.runExec === 'function') {
+                return testOverrides.runExec(sql);
+            }
+            for await (const stmt of sqlite3.statements(db, sql)) {
+                await sqlite3.step(stmt);
+            }
+        }
+
+        function convertToCSV(columns, rows) {
+            // PapaParse handles quoting, delimiters, and multiline payloads per RFC 4180.
+            return Papa.unparse({
+                fields: columns,
+                data: rows
+            }, {
+                newline: '\n'
+            });
+        }
+
+        async function importCSV(tableName, csvText) {
+            if (isTestMode && typeof testOverrides.importCSV === 'function') {
+                return testOverrides.importCSV(tableName, csvText);
+            }
+            const parsed = Papa.parse(csvText, {
+                header: true,
+                skipEmptyLines: 'greedy',
+                dynamicTyping: false
+            });
+
+            if (parsed.errors.length) {
+                throw new Error(`CSV parse error in ${tableName}.csv: ${parsed.errors[0].message}`);
+            }
+
+            const columns = parsed.meta.fields || [];
+            if (columns.length === 0) {
+                log(`CSV '${tableName}.csv' missing header. Skipping.`);
+                return;
+            }
+
+            const dataRows = parsed.data.filter(row =>
+                columns.some(col => {
+                    const value = row[col];
+                    return value !== undefined && value !== null && value !== '';
+                })
+            );
+
+            await runExec('BEGIN TRANSACTION;');
+            try {
+                for (const record of dataRows) {
+                    const values = columns.map(col => record[col] ?? null);
+                    const placeholders = columns.map(() => '?').join(',');
+                    const columnList = columns.map(col => escapeIdentifier(col)).join(',');
+                    const sql = `INSERT INTO ${escapeIdentifier(tableName)} (${columnList}) VALUES (${placeholders})`;
+
+                    for await (const stmt of sqlite3.statements(db, sql)) {
+                        values.forEach((val, idx) => {
+                            sqlite3.bind(stmt, idx + 1, val);
+                        });
+                        await sqlite3.step(stmt);
+                    }
+                }
+
+                await runExec('COMMIT;');
+            } catch (err) {
+                await runExec('ROLLBACK;');
+                throw err;
+            }
         }
 
         function log(msg) {
@@ -79,158 +511,30 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             output.scrollTop = output.scrollHeight;
         }
 
-        async function initSQLite() {
-            if (sqlite3) {
-                return sqlite3;
-            }
-            if (isTestMode && typeof testOverrides.initSQLite === 'function') {
-                return testOverrides.initSQLite();
-            }
-            setStatus('Loading SQLite runtime...', 'orange');
-            wasmModule = await SQLiteESMFactory();
-            sqlite3 = SQLite.Factory(wasmModule);
-            log('SQLite runtime loaded. Initialize OPFS to continue.');
-            return sqlite3;
-        }
-
-        async function registerVfs() {
-            if (vfsRegistered) {
-                return;
-            }
-            const factory = (isTestMode && typeof testOverrides.createVfs === 'function')
-                ? testOverrides.createVfs
-                : () => OPFSAnyContextVFS.create(VFS_NAME, wasmModule);
-            const vfs = await factory(VFS_NAME, wasmModule);
-            if (isTestMode && typeof testOverrides.vfsRegister === 'function') {
-                await testOverrides.vfsRegister(vfs);
-            } else {
-                sqlite3.vfs_register(vfs, true);
-            }
-            vfsRegistered = true;
-        }
-
-        async function ensureDatabase() {
-            if (db) {
-                setStatus('Ready.', 'green');
-                return db;
-            }
-            if (initPromise) {
-                return initPromise;
-            }
-
-            initPromise = (async () => {
-                setStatus('Preparing OPFS-backed database...', 'orange');
-                try {
-                    await initSQLite();
-                    await registerVfs();
-
-                    const openDatabase = (isTestMode && typeof testOverrides.openDatabase === 'function')
-                        ? testOverrides.openDatabase
-                        : () => sqlite3.open_v2(DB_PATH, OPEN_FLAGS, VFS_NAME);
-
-                    db = await openDatabase();
-                    sqlite3.update_hook(db, () => {
-                        setStatus('Changes persisted to OPFS.', 'green');
-                    });
-                    btnRun.disabled = false;
-                    setStatus('Ready.', 'green');
-                    log('OPFS-backed SQLite ready.');
-                    return db;
-                } catch (err) {
-                    setStatus('Init failed.', 'red');
-                    log('Initialization error: ' + err.message);
-                    throw err;
-                }
-            })();
-
-            try {
-                return await initPromise;
-            } finally {
-                initPromise = null;
-            }
-        }
-
-        async function runQuery(sql, targetDb = db) {
-            if (isTestMode && typeof testOverrides.runQuery === 'function') {
-                return testOverrides.runQuery(sql, targetDb);
-            }
-            if (!targetDb) {
-                throw new Error('Database not initialized');
-            }
-            let columns = [];
-            const rows = [];
-            for await (const stmt of sqlite3.statements(targetDb, sql)) {
-                while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
-                    if (columns.length === 0) {
-                        columns = sqlite3.column_names(stmt);
-                    }
-                    rows.push(sqlite3.row(stmt));
-                }
-            }
-            return { columns, rows };
-        }
-
-        async function runExec(sql, targetDb = db) {
-            if (isTestMode && typeof testOverrides.runExec === 'function') {
-                return testOverrides.runExec(sql, targetDb);
-            }
-            if (!targetDb) {
-                throw new Error('Database not initialized');
-            }
-            for await (const stmt of sqlite3.statements(targetDb, sql)) {
-                await sqlite3.step(stmt);
-            }
-        }
-
-        btnSelectDir.addEventListener('click', async () => {
-            try {
-                await ensureDatabase();
-            } catch (err) {
-                // error already logged
-            }
-        });
-
-        btnRun.addEventListener('click', async () => {
-            const sql = sqlInput.value;
-            if (!sql.trim()) {
-                log('Please enter SQL to execute.');
-                return;
-            }
-
-            try {
-                await ensureDatabase();
-                const results = [];
-                for await (const stmt of sqlite3.statements(db, sql)) {
-                    let columns = [];
-                    const rows = [];
-                    while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
-                        columns = sqlite3.column_names(stmt);
-                        rows.push(sqlite3.row(stmt));
-                    }
-                    if (columns.length > 0) {
-                        results.push({ columns, rows });
-                    }
-                }
-                if (results.length === 0) {
-                    log('Query executed successfully (No output rows).');
-                } else {
-                    log(JSON.stringify(results, null, 2));
-                }
-            } catch (err) {
-                log('SQL Error: ' + err.message);
-            }
-        });
-
+        // Initialize on load (skip during tests so we can stub dependencies)
         if (!isTestMode) {
-            initSQLite().catch(err => {
-                log('Failed to load SQLite: ' + err.message);
-                setStatus('Load failed.', 'red');
-            });
+            initSQLite();
         }
 
         if (window.QUnit) {
             if (isTestMode) {
                 document.body.classList.add('testing');
+
+                QUnit.module('CSV Helpers', () => {
+                    QUnit.test('convertToCSV serializes headers and rows', assert => {
+                        const csv = convertToCSV(['id', 'name'], [
+                            [1, 'Alice'],
+                            [2, 'Bob']
+                        ]);
+                        assert.equal(csv.trim(), 'id,name\n1,Alice\n2,Bob', 'CSV output preserves column order and rows.');
+                    });
+
+                    QUnit.test('convertToCSV escapes commas, quotes, and newlines', assert => {
+                        const payload = 'He said, "Hi"\nNext line';
+                        const csv = convertToCSV(['note'], [[payload]]);
+                        assert.equal(csv.trim(), 'note\n"He said, ""Hi""\nNext line"', 'CSV escapes special characters per RFC 4180.');
+                    });
+                });
 
                 QUnit.module('Logger', hooks => {
                     hooks.beforeEach(() => {
@@ -240,74 +544,231 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                     QUnit.test('log appends newline-delimited entries', assert => {
                         log('Alpha');
                         log('Beta');
+                        assert.true(output.textContent.endsWith('Beta\n'), 'Last message ends with newline.');
                         const lines = output.textContent.trim().split('\n');
                         assert.deepEqual(lines, ['Alpha', 'Beta'], 'Messages preserve order.');
                     });
                 });
 
-                QUnit.module('Initialization Flow', hooks => {
-                    let originalSqlite3;
-                    let originalDb;
-                    let originalModule;
-                    let originalVfsFlag;
+                QUnit.module('File Helpers', hooks => {
+                    let originalDirHandle;
 
                     hooks.beforeEach(() => {
-                        originalSqlite3 = sqlite3;
-                        originalDb = db;
-                        originalModule = wasmModule;
-                        originalVfsFlag = vfsRegistered;
-                        sqlite3 = {
-                            statements: async function* () { },
-                            step: async () => SQLite.SQLITE_DONE,
-                            column_names: () => [],
-                            row: () => [],
-                            vfs_register: () => { registeredCount++; },
-                            open_v2: async () => ({ connection: 'db' }),
-                            update_hook: () => { }
-                        };
-                        wasmModule = { tag: 'test' };
-                        db = null;
-                        vfsRegistered = false;
-                        btnRun.disabled = true;
-                        registeredCount = 0;
-                        testOverrides.initSQLite = async () => sqlite3;
-                        testOverrides.createVfs = async () => ({ vfs: true });
-                        testOverrides.openDatabase = async () => ({ connection: 'db' });
+                        originalDirHandle = dirHandle;
                     });
 
                     hooks.afterEach(() => {
-                        sqlite3 = originalSqlite3;
-                        db = originalDb;
-                        wasmModule = originalModule;
-                        vfsRegistered = originalVfsFlag;
-                        delete testOverrides.initSQLite;
-                        delete testOverrides.createVfs;
-                        delete testOverrides.openDatabase;
-                        delete testOverrides.vfsRegister;
+                        dirHandle = originalDirHandle;
                     });
 
-                    let registeredCount = 0;
+                    QUnit.test('writeFile streams entire payload to the chosen handle', async assert => {
+                        const writes = [];
+                        dirHandle = {
+                            getFileHandle: async filename => ({
+                                createWritable: async () => ({
+                                    write: async content => {
+                                        writes.push({ filename, content });
+                                    },
+                                    close: async () => {}
+                                })
+                            })
+                        };
 
-                    QUnit.test('ensureDatabase registers VFS and opens once', async assert => {
-                        assert.expect(5);
-                        await ensureDatabase();
-                        await ensureDatabase();
-                        assert.equal(btnRun.disabled, false, 'Run button enabled after init.');
-                        assert.ok(statusSpan.textContent.includes('Ready'), 'Status indicates ready state.');
-                        assert.equal(vfsRegistered, true, 'VFS flagged as registered.');
-                        assert.equal(registeredCount, 1, 'VFS registered exactly once.');
-                        assert.deepEqual(db, { connection: 'db' }, 'Database handle retained.');
+                        await writeFile('demo.txt', 'payload');
+                        assert.deepEqual(writes, [{ filename: 'demo.txt', content: 'payload' }], 'writeFile forwards the entire buffer.');
+                    });
+                });
+
+                QUnit.module('Directory Linking', hooks => {
+                    let originalRestoreDatabase;
+                    let originalDirHandle;
+
+                    hooks.beforeEach(() => {
+                        originalRestoreDatabase = restoreDatabase;
+                        originalDirHandle = dirHandle;
+                        output.textContent = '';
+                        statusSpan.textContent = 'Waiting...';
+                        statusSpan.style.color = 'gray';
                     });
 
-                    QUnit.test('ensureDatabase surfaces initialization errors', async assert => {
-                        assert.expect(2);
-                        testOverrides.openDatabase = async () => { throw new Error('boom'); };
-                        try {
-                            await ensureDatabase();
-                        } catch (err) {
-                            assert.ok(statusSpan.textContent.includes('Init failed'), 'Status reflects failure.');
-                            assert.equal(err.message, 'boom', 'Error bubbles to caller.');
+                    hooks.afterEach(() => {
+                        restoreDatabase = originalRestoreDatabase;
+                        dirHandle = originalDirHandle;
+                    });
+
+                    QUnit.test('linkDirectory automatically restores existing backups', async assert => {
+                        assert.expect(4);
+                        const fakeHandle = { name: 'backup-folder' };
+                        let restoreCalls = 0;
+                        restoreDatabase = async () => {
+                            restoreCalls++;
+                            return true;
+                        };
+
+                        await linkDirectory(fakeHandle);
+
+                        assert.equal(dirHandle, fakeHandle, 'Directory handle persists globally.');
+                        assert.equal(restoreCalls, 1, 'restoreDatabase invoked once.');
+                        assert.equal(statusSpan.textContent, 'Ready.', 'Status indicates successful restore.');
+                        assert.equal(statusSpan.style.color, 'green', 'Success state uses green accent.');
+                    });
+
+                    QUnit.test('linkDirectory reports when no prior backup exists', async assert => {
+                        restoreDatabase = async () => false;
+
+                        await linkDirectory({ name: 'empty-folder' });
+
+                        assert.equal(statusSpan.textContent, 'Folder Linked. No prior backup.', 'Status communicates empty backup folder.');
+                        assert.equal(statusSpan.style.color, 'blue', 'Info state uses blue accent.');
+                    });
+
+                    QUnit.test('linkDirectory surfaces restore failures in the status indicator', async assert => {
+                        restoreDatabase = async () => {
+                            throw new Error('boom');
+                        };
+
+                        await linkDirectory({ name: 'broken-folder' });
+
+                        assert.equal(statusSpan.textContent, 'Restore Failed.', 'Status reflects restore failure.');
+                        assert.equal(statusSpan.style.color, 'red', 'Failure state uses red accent.');
+                    });
+                });
+
+                QUnit.module('Debounce Logic', hooks => {
+                    let performBackupOverrideSnapshot;
+                    let scheduleSnapshot;
+                    let cancelSnapshot;
+
+                    hooks.beforeEach(() => {
+                        performBackupOverrideSnapshot = testOverrides.performBackup;
+                        scheduleSnapshot = testOverrides.scheduleDebounce;
+                        cancelSnapshot = testOverrides.cancelDebounce;
+                    });
+
+                    hooks.afterEach(() => {
+                        testOverrides.performBackup = performBackupOverrideSnapshot;
+                        testOverrides.scheduleDebounce = scheduleSnapshot;
+                        testOverrides.cancelDebounce = cancelSnapshot;
+                        if (debounceTimer) {
+                            cancelDebounceHandle(debounceTimer);
+                            debounceTimer = null;
                         }
+                        statusSpan.textContent = 'Waiting...';
+                    });
+
+                    QUnit.test('debounceBackup triggers performBackup once after delay', assert => {
+                        assert.expect(3);
+                        let callCount = 0;
+                        let scheduledTask;
+
+                        testOverrides.performBackup = async () => {
+                            callCount++;
+                        };
+                        testOverrides.scheduleDebounce = callback => {
+                            scheduledTask = callback;
+                            return { id: 'timer-1' };
+                        };
+                        testOverrides.cancelDebounce = () => {
+                            scheduledTask = null;
+                        };
+
+                        debounceBackup();
+                        assert.ok(statusSpan.textContent.includes('Changes detected'), 'Status shows pending save.');
+                        assert.ok(typeof scheduledTask === 'function', 'Scheduler captured callback.');
+
+                        scheduledTask();
+                        assert.equal(callCount, 1, 'performBackup invoked once when scheduled task runs.');
+                    });
+
+                    QUnit.test('debounceBackup resets the timer on rapid successive calls', assert => {
+                        assert.expect(3);
+                        let callCount = 0;
+                        const scheduledHandles = [];
+                        const cancelledHandles = new Set();
+
+                        testOverrides.performBackup = async () => {
+                            callCount++;
+                        };
+                        testOverrides.scheduleDebounce = callback => {
+                            const handle = { callback };
+                            scheduledHandles.push(handle);
+                            return handle;
+                        };
+                        testOverrides.cancelDebounce = handle => {
+                            cancelledHandles.add(handle);
+                        };
+
+                        debounceBackup();
+                        const firstHandle = scheduledHandles[0];
+                        debounceBackup();
+                        const secondHandle = scheduledHandles[1];
+                        debounceBackup();
+                        const finalHandle = scheduledHandles[2];
+
+                        assert.ok(cancelledHandles.has(firstHandle) && cancelledHandles.has(secondHandle), 'Earlier timers are cancelled.');
+
+                        finalHandle.callback();
+                        assert.equal(callCount, 1, 'Only last scheduled callback invokes performBackup.');
+                        assert.equal(cancelledHandles.size, 2, 'Exactly two timers were cancelled.');
+                    });
+                });
+
+                QUnit.module('Backup Persistence', hooks => {
+                    let runQueryOverrideSnapshot;
+                    let writeFileOverrideSnapshot;
+                    let originalDirHandle;
+
+                    hooks.beforeEach(() => {
+                        runQueryOverrideSnapshot = testOverrides.runQuery;
+                        writeFileOverrideSnapshot = testOverrides.writeFile;
+                        originalDirHandle = dirHandle;
+                    });
+
+                    hooks.afterEach(() => {
+                        testOverrides.runQuery = runQueryOverrideSnapshot;
+                        testOverrides.writeFile = writeFileOverrideSnapshot;
+                        dirHandle = originalDirHandle;
+                    });
+
+                    QUnit.test('performBackup logs warnings when no folder is linked', async assert => {
+                        dirHandle = null;
+                        const before = output.textContent;
+                        await performBackup();
+                        assert.ok(output.textContent.includes('Warning: DB changed but no folder selected for backup.'), 'Warning is emitted when directory is missing.');
+                        assert.equal(output.textContent.length > before.length, true, 'Log grows when warning is emitted.');
+                    });
+
+                    QUnit.test('performBackup writes schema and CSV snapshots for all tables', async assert => {
+                        const writes = [];
+                        dirHandle = {};
+                        testOverrides.runQuery = async sql => {
+                            if (sql.startsWith('SELECT sql')) {
+                                return {
+                                    columns: ['sql', 'name'],
+                                    rows: [
+                                        ['CREATE TABLE users (id INTEGER, name TEXT)', 'users'],
+                                        ['CREATE TABLE orders (id INTEGER, total REAL)', 'orders']
+                                    ]
+                                };
+                            }
+                            if (sql.includes('"users"')) {
+                                return { columns: ['id', 'name'], rows: [[1, 'Alice']] };
+                            }
+                            if (sql.includes('"orders"')) {
+                                return { columns: ['id', 'total'], rows: [[10, 42.5]] };
+                            }
+                            throw new Error('Unexpected SQL in test');
+                        };
+                        testOverrides.writeFile = async (filename, content) => {
+                            writes.push({ filename, content: content.trim() });
+                        };
+
+                        await performBackup();
+                        assert.deepEqual(writes.map(w => w.filename), ['schema.sql', 'users.csv', 'orders.csv'], 'Schema and every table export are written.');
+                        const schemaContent = writes.find(w => w.filename === 'schema.sql').content;
+                        assert.true(schemaContent.includes('CREATE TABLE users'), 'Schema contains users table DDL.');
+                        const userCsv = writes.find(w => w.filename === 'users.csv').content;
+                        assert.equal(userCsv, 'id,name\n1,Alice', 'User CSV mirrors query results.');
                     });
                 });
 
@@ -322,22 +783,17 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                         const rows = [[1, 'Alice'], [2, 'Bob']];
                         sqlite3 = {
                             statements: async function* () {
-                                const stmt = { index: 0 };
-                                yield stmt;
+                                yield { index: 0 };
                             },
                             step: async stmt => {
-                                if (!stmt.iter) {
-                                    stmt.iter = 0;
-                                }
-                                if (stmt.iter < rows.length) {
-                                    stmt.iter++;
-                                    stmt.current = rows[stmt.iter - 1];
+                                if (stmt.index < rows.length) {
+                                    stmt.index++;
                                     return SQLite.SQLITE_ROW;
                                 }
                                 return SQLite.SQLITE_DONE;
                             },
                             column_names: () => ['id', 'name'],
-                            row: stmt => stmt.current
+                            row: stmt => rows[stmt.index - 1]
                         };
                     });
 
@@ -346,27 +802,215 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                         db = originalDb;
                     });
 
-                    QUnit.test('runQuery returns columns and rows', async assert => {
+                    QUnit.test('runQuery aggregates column names and rows', async assert => {
+                        const rows = [[1, 'Alice'], [2, 'Bob']];
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { index: 0 };
+                            },
+                            step: async stmt => {
+                                if (stmt.index < rows.length) {
+                                    stmt.index++;
+                                    return SQLite.SQLITE_ROW;
+                                }
+                                return SQLite.SQLITE_DONE;
+                            },
+                            column_names: () => ['id', 'name'],
+                            row: stmt => rows[stmt.index - 1]
+                        };
+
                         const result = await runQuery('SELECT * FROM users');
-                        assert.deepEqual(result.columns, ['id', 'name'], 'Columns preserved.');
-                        assert.deepEqual(result.rows, [[1, 'Alice'], [2, 'Bob']], 'Rows preserved.');
+                        assert.deepEqual(result.columns, ['id', 'name'], 'Columns returned exactly once.');
+                        assert.deepEqual(result.rows, rows, 'Rows preserve order and values.');
                     });
 
-                    QUnit.test('runExec iterates through statements', async assert => {
+                    QUnit.test('runExec steps through every prepared statement', async assert => {
                         const executed = [];
-                        sqlite3.statements = async function* (_db, sql) {
-                            executed.push(sql);
-                            yield {};
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                executed.push(sql);
+                                yield {};
+                            },
+                            step: async () => SQLite.SQLITE_DONE
                         };
-                        sqlite3.step = async () => SQLite.SQLITE_DONE;
-                        await runExec('DELETE FROM users');
-                        assert.deepEqual(executed, ['DELETE FROM users'], 'SQL forwarded to engine.');
+
+                        await runExec('DELETE FROM users;');
+                        assert.deepEqual(executed, ['DELETE FROM users;'], 'Each SQL string is forwarded to sqlite engine.');
+                    });
+                });
+
+                QUnit.module('Restore Logic', hooks => {
+                    let originalDirHandle;
+                    let runExecOverrideSnapshot;
+                    let importOverrideSnapshot;
+
+                    hooks.beforeEach(() => {
+                        originalDirHandle = dirHandle;
+                        runExecOverrideSnapshot = testOverrides.runExec;
+                        importOverrideSnapshot = testOverrides.importCSV;
+                    });
+
+                    hooks.afterEach(() => {
+                        dirHandle = originalDirHandle;
+                        testOverrides.runExec = runExecOverrideSnapshot;
+                        testOverrides.importCSV = importOverrideSnapshot;
+                    });
+
+                    QUnit.test('restoreDatabase no-ops when no directory is selected', async assert => {
+                        dirHandle = null;
+                        const before = output.textContent;
+                        await restoreDatabase();
+                        assert.equal(output.textContent, before, 'No log changes occur without a directory.');
+                    });
+
+                    QUnit.test('restoreDatabase logs when schema.sql is missing', async assert => {
+                        dirHandle = {
+                            getFileHandle: async () => {
+                                throw new Error('NotFoundError');
+                            }
+                        };
+                        await restoreDatabase();
+                        assert.ok(output.textContent.includes('No schema.sql found. Starting fresh.'), 'Missing schema surfaces an informational log.');
+                    });
+
+                    QUnit.test('restoreDatabase applies schema and imports CSV payloads', async assert => {
+                        const execCalls = [];
+                        const imports = [];
+                        dirHandle = {
+                            getFileHandle: async () => ({
+                                getFile: async () => ({
+                                    text: async () => 'CREATE TABLE users (id INTEGER);'
+                                })
+                            }),
+                            entries: async function* () {
+                                yield ['users.csv', {
+                                    getFile: async () => ({ text: async () => 'id,name\n1,Alice' })
+                                }];
+                                yield ['notes.txt', {
+                                    getFile: async () => ({ text: async () => 'ignore' })
+                                }];
+                            }
+                        };
+                        testOverrides.runExec = async sql => {
+                            execCalls.push(sql.trim());
+                        };
+                        testOverrides.importCSV = async (table, csvText) => {
+                            imports.push({ table, csvText: csvText.trim() });
+                        };
+
+                        await restoreDatabase();
+                        assert.deepEqual(execCalls, ['CREATE TABLE users (id INTEGER);'], 'Schema SQL replays through runExec.');
+                        assert.deepEqual(imports, [{ table: 'users', csvText: 'id,name\n1,Alice' }], 'CSV files are passed to importCSV with table names.');
+                    });
+                });
+
+                QUnit.module('CSV Import', hooks => {
+                    let originalSqlite3;
+                    let runExecOverrideSnapshot;
+                    let originalDb;
+
+                    hooks.beforeEach(() => {
+                        originalSqlite3 = sqlite3;
+                        runExecOverrideSnapshot = testOverrides.runExec;
+                        originalDb = db;
+                        db = {};
+                    });
+
+                    hooks.afterEach(() => {
+                        sqlite3 = originalSqlite3;
+                        testOverrides.runExec = runExecOverrideSnapshot;
+                        db = originalDb;
+                    });
+
+                    QUnit.test('importCSV inserts rows and wraps them in a transaction', async assert => {
+                        const execCalls = [];
+                        const executedStatements = [];
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                const stmt = { sql, bindings: [] };
+                                executedStatements.push(stmt);
+                                yield stmt;
+                            },
+                            bind: (stmt, idx, val) => {
+                                stmt.bindings[idx - 1] = val;
+                            },
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async sql => {
+                            execCalls.push(sql);
+                        };
+
+                        await importCSV('users', 'id,name\n1,Alice\n2,Bob');
+                        assert.deepEqual(execCalls, ['BEGIN TRANSACTION;', 'COMMIT;'], 'Transaction boundaries executed.');
+                        assert.equal(executedStatements.length, 2, 'One insert per populated row.');
+                        assert.deepEqual(executedStatements[0].bindings, ['1', 'Alice'], 'First row bound correctly.');
+                        assert.deepEqual(executedStatements[1].bindings, ['2', 'Bob'], 'Second row bound correctly.');
+                    });
+
+                    QUnit.test('importCSV skips rows that contain no data', async assert => {
+                        const executedStatements = [];
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                const stmt = { sql, bindings: [] };
+                                executedStatements.push(stmt);
+                                yield stmt;
+                            },
+                            bind: (stmt, idx, val) => {
+                                stmt.bindings[idx - 1] = val;
+                            },
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async () => {};
+
+                        await importCSV('users', 'id,name\n,\n3,Charlie');
+                        assert.equal(executedStatements.length, 1, 'Only the populated row is inserted.');
+                        assert.deepEqual(executedStatements[0].bindings, ['3', 'Charlie'], 'Values from the populated row are preserved.');
+                    });
+
+                    QUnit.test('importCSV reports malformed CSV payloads', async assert => {
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { sql: '' };
+                            },
+                            bind: () => {},
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async () => {};
+
+                        await assert.rejects(importCSV('broken', '"unterminated'), /CSV parse error/, 'Parser failure surfaces to the caller.');
+                    });
+
+                    QUnit.test('importCSV logs and returns when headers are missing', async assert => {
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { sql: '' };
+                            },
+                            bind: () => {},
+                            step: async () => {}
+                        };
+                        const before = output.textContent;
+                        const originalParse = Papa.parse;
+                        try {
+                            Papa.parse = () => ({
+                                data: [],
+                                errors: [],
+                                meta: { fields: [] }
+                            });
+
+                            await importCSV('empty', 'id,name');
+                        } finally {
+                            Papa.parse = originalParse;
+                        }
+
+                        assert.ok(output.textContent.includes("CSV 'empty.csv' missing header. Skipping."), 'Header check alerts user.');
+                        assert.equal(output.textContent.length > before.length, true, 'Log updated for missing header.');
                     });
                 });
             } else {
                 QUnit.config.autostart = false;
             }
         }
+
     </script>
 </body>
 </html>
