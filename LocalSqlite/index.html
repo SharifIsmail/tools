@@ -70,6 +70,9 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         const urlParams = new URLSearchParams(window.location.search);
         const isTestMode = urlParams.get('test') === 'true';
         const testOverrides = Object.create(null);
+        const schemaMutationRegex = /\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b/i;
+
+        const containsSchemaMutation = sql => schemaMutationRegex.test(sql);
 
         // --- 1. Initialization ---
 
@@ -120,6 +123,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
         btnRun.addEventListener('click', async () => {
             const sql = sqlInput.value;
+            const schemaMutationRequested = containsSchemaMutation(sql);
             try {
                 const results = [];
                 // wa-sqlite creates an async iterator for results
@@ -141,6 +145,10 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                     log("Query executed successfully (No output rows).");
                 } else {
                     log(JSON.stringify(results, null, 2));
+                }
+
+                if (schemaMutationRequested) {
+                    debounceBackup();
                 }
 
             } catch (err) {
