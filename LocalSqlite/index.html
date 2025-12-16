@@ -4,8 +4,21 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Serverless SQLite with CSV Sync</title>
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
+    <style>
+        #qunit,
+        #qunit-fixture {
+            display: none;
+        }
+
+        body.testing #qunit,
+        body.testing #qunit-fixture {
+            display: block;
+            margin-top: 20px;
+        }
+    </style>
 </head>
-<body>
+<body>  
 
     <h1>Backendless SQLite + Local Backup</h1>
     <p>
@@ -33,9 +46,14 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
     <h3>Results / Logs:</h3>
     <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
 
+    <div id="qunit"></div>
+    <div id="qunit-fixture"></div>
+
+    <script src="https://code.jquery.com/qunit/qunit-2.20.0.js"></script>
     <script type="module">
         import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite-async.mjs';
         import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/src/sqlite-api.js';
+        import Papa from 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/+esm';
 
         let sqlite3;
         let db;
@@ -49,6 +67,9 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         const sqlInput = document.getElementById('sqlInput');
         const output = document.getElementById('output');
         const statusSpan = document.getElementById('status');
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTestMode = urlParams.get('test') === 'true';
+        const testOverrides = Object.create(null);
 
         // --- 1. Initialization ---
 
@@ -129,17 +150,35 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
         // --- 4. Backup Logic (Export to CSV + Schema) ---
 
+        const scheduleDebounce = callback => {
+            if (isTestMode && typeof testOverrides.scheduleDebounce === 'function') {
+                return testOverrides.scheduleDebounce(callback);
+            }
+            return window.setTimeout(callback, 1000);
+        };
+
+        const cancelDebounceHandle = handle => {
+            if (!handle) return;
+            if (isTestMode && typeof testOverrides.cancelDebounce === 'function') {
+                return testOverrides.cancelDebounce(handle);
+            }
+            clearTimeout(handle);
+        };
+
         // Debounce to prevent saving 100 times if 100 inserts happen quickly
         let debounceTimer;
         function debounceBackup() {
-            if (debounceTimer) clearTimeout(debounceTimer);
+            if (debounceTimer) cancelDebounceHandle(debounceTimer);
             statusSpan.textContent = "Changes detected. Pending save...";
-            debounceTimer = setTimeout(() => {
+            debounceTimer = scheduleDebounce(() => {
                 performBackup();
-            }, 1000); // Wait 1 second after last change
+            });
         }
 
         async function performBackup() {
+            if (isTestMode && typeof testOverrides.performBackup === 'function') {
+                return testOverrides.performBackup();
+            }
             if (!dirHandle) {
                 log("Warning: DB changed but no folder selected for backup.");
                 return;
@@ -227,6 +266,9 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         // --- Helpers ---
 
         async function writeFile(filename, content) {
+            if (isTestMode && typeof testOverrides.writeFile === 'function') {
+                return testOverrides.writeFile(filename, content);
+            }
             const fileHandle = await dirHandle.getFileHandle(filename, { create: true });
             const writable = await fileHandle.createWritable();
             await writable.write(content);
@@ -234,6 +276,9 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         }
 
         async function runQuery(sql) {
+            if (isTestMode && typeof testOverrides.runQuery === 'function') {
+                return testOverrides.runQuery(sql);
+            }
             let columns = [];
             const rows = [];
             for await (const stmt of sqlite3.statements(db, sql)) {
@@ -246,74 +291,67 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         }
 
         async function runExec(sql) {
+            if (isTestMode && typeof testOverrides.runExec === 'function') {
+                return testOverrides.runExec(sql);
+            }
             for await (const stmt of sqlite3.statements(db, sql)) {
                 await sqlite3.step(stmt);
             }
         }
 
         function convertToCSV(columns, rows) {
-            // Helper to escape CSV values (wrap in quotes if contains comma or quote)
-            const escape = (val) => {
-                if (val === null) return "";
-                const str = String(val);
-                if (str.includes(',') || str.includes('"') || str.includes('\n')) {
-                    return `"${str.replace(/"/g, '""')}"`;
-                }
-                return str;
-            };
-
-            const header = columns.map(escape).join(',');
-            const body = rows.map(row => row.map(escape).join(',')).join('\n');
-            return header + '\n' + body;
+            // PapaParse handles quoting, delimiters, and multiline payloads per RFC 4180.
+            return Papa.unparse({
+                fields: columns,
+                data: rows
+            }, {
+                newline: '\n'
+            });
         }
 
         async function importCSV(tableName, csvText) {
-            // Very basic CSV parser. 
-            // Note: A robust parser is complex. This assumes standard CSV format.
-            const lines = csvText.trim().split('\n');
-            if (lines.length < 2) return; // Empty or just header
-
-            // Parse Header to ensure column mapping
-            // (We assume the CSV header matches DB column names)
-            
-            // Simple split (won't handle newlines inside quotes correctly, but enough for demo)
-            // For production, use a library like PapaParse.
-            const rows = lines.map(line => {
-                // Regex to split by comma, ignoring commas inside quotes
-                const matches = line.match(/(".*?"|[^",\s]+)(?=\s*,|\s*$)/g);
-                return matches ? matches.map(m => {
-                    // Remove surrounding quotes and unescape double quotes
-                    if (m.startsWith('"') && m.endsWith('"')) {
-                        return m.slice(1, -1).replace(/""/g, '"');
-                    }
-                    return m;
-                }) : [];
+            if (isTestMode && typeof testOverrides.importCSV === 'function') {
+                return testOverrides.importCSV(tableName, csvText);
+            }
+            const parsed = Papa.parse(csvText, {
+                header: true,
+                skipEmptyLines: 'greedy',
+                dynamicTyping: false
             });
 
-            // Remove header
-            rows.shift(); 
+            if (parsed.errors.length) {
+                throw new Error(`CSV parse error in ${tableName}.csv: ${parsed.errors[0].message}`);
+            }
 
-            // Construct INSERT statements
-            // We use parameters (?) for safety, though we are building the query string manually here
-            // because `wa-sqlite` binding is slightly verbose for bulk insert in this simple demo.
-            
+            const columns = parsed.meta.fields || [];
+            if (columns.length === 0) {
+                log(`CSV '${tableName}.csv' missing header. Skipping.`);
+                return;
+            }
+
+            const dataRows = parsed.data.filter(row =>
+                columns.some(col => {
+                    const value = row[col];
+                    return value !== undefined && value !== null && value !== '';
+                })
+            );
+
             await runExec("BEGIN TRANSACTION;");
-            
-            for(const row of rows) {
-                if(row.length === 0) continue;
-                
-                const placeholders = row.map(() => '?').join(',');
-                const sql = `INSERT INTO "${tableName}" VALUES (${placeholders})`;
-                
-                // Bind and execute
+
+            for (const record of dataRows) {
+                const values = columns.map(col => record[col] ?? null);
+                const placeholders = columns.map(() => '?').join(',');
+                const columnList = columns.map(col => `"${col}"`).join(',');
+                const sql = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})`;
+
                 for await (const stmt of sqlite3.statements(db, sql)) {
-                    row.forEach((val, idx) => {
+                    values.forEach((val, idx) => {
                         sqlite3.bind(stmt, idx + 1, val);
                     });
                     await sqlite3.step(stmt);
                 }
             }
-            
+
             await runExec("COMMIT;");
         }
 
@@ -322,8 +360,435 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             output.scrollTop = output.scrollHeight;
         }
 
-        // Initialize on load
-        initSQLite();
+        // Initialize on load (skip during tests so we can stub dependencies)
+        if (!isTestMode) {
+            initSQLite();
+        }
+
+        if (window.QUnit) {
+            if (isTestMode) {
+                document.body.classList.add('testing');
+
+                QUnit.module('CSV Helpers', () => {
+                    QUnit.test('convertToCSV serializes headers and rows', assert => {
+                        const csv = convertToCSV(['id', 'name'], [
+                            [1, 'Alice'],
+                            [2, 'Bob']
+                        ]);
+                        assert.equal(csv.trim(), 'id,name\n1,Alice\n2,Bob', 'CSV output preserves column order and rows.');
+                    });
+
+                    QUnit.test('convertToCSV escapes commas, quotes, and newlines', assert => {
+                        const payload = 'He said, "Hi"\nNext line';
+                        const csv = convertToCSV(['note'], [[payload]]);
+                        assert.equal(csv.trim(), 'note\n"He said, ""Hi""\nNext line"', 'CSV escapes special characters per RFC 4180.');
+                    });
+                });
+
+                QUnit.module('Logger', hooks => {
+                    hooks.beforeEach(() => {
+                        output.textContent = '';
+                    });
+
+                    QUnit.test('log appends newline-delimited entries', assert => {
+                        log('Alpha');
+                        log('Beta');
+                        assert.true(output.textContent.endsWith('Beta\n'), 'Last message ends with newline.');
+                        const lines = output.textContent.trim().split('\n');
+                        assert.deepEqual(lines, ['Alpha', 'Beta'], 'Messages preserve order.');
+                    });
+                });
+
+                QUnit.module('File Helpers', hooks => {
+                    let originalDirHandle;
+
+                    hooks.beforeEach(() => {
+                        originalDirHandle = dirHandle;
+                    });
+
+                    hooks.afterEach(() => {
+                        dirHandle = originalDirHandle;
+                    });
+
+                    QUnit.test('writeFile streams entire payload to the chosen handle', async assert => {
+                        const writes = [];
+                        dirHandle = {
+                            getFileHandle: async filename => ({
+                                createWritable: async () => ({
+                                    write: async content => {
+                                        writes.push({ filename, content });
+                                    },
+                                    close: async () => {}
+                                })
+                            })
+                        };
+
+                        await writeFile('demo.txt', 'payload');
+                        assert.deepEqual(writes, [{ filename: 'demo.txt', content: 'payload' }], 'writeFile forwards the entire buffer.');
+                    });
+                });
+
+                QUnit.module('Debounce Logic', hooks => {
+                    let performBackupOverrideSnapshot;
+                    let scheduleSnapshot;
+                    let cancelSnapshot;
+
+                    hooks.beforeEach(() => {
+                        performBackupOverrideSnapshot = testOverrides.performBackup;
+                        scheduleSnapshot = testOverrides.scheduleDebounce;
+                        cancelSnapshot = testOverrides.cancelDebounce;
+                    });
+
+                    hooks.afterEach(() => {
+                        testOverrides.performBackup = performBackupOverrideSnapshot;
+                        testOverrides.scheduleDebounce = scheduleSnapshot;
+                        testOverrides.cancelDebounce = cancelSnapshot;
+                        if (debounceTimer) {
+                            cancelDebounceHandle(debounceTimer);
+                            debounceTimer = null;
+                        }
+                        statusSpan.textContent = 'Waiting...';
+                    });
+
+                    QUnit.test('debounceBackup triggers performBackup once after delay', assert => {
+                        assert.expect(3);
+                        let callCount = 0;
+                        let scheduledTask;
+
+                        testOverrides.performBackup = async () => {
+                            callCount++;
+                        };
+                        testOverrides.scheduleDebounce = callback => {
+                            scheduledTask = callback;
+                            return { id: 'timer-1' };
+                        };
+                        testOverrides.cancelDebounce = () => {
+                            scheduledTask = null;
+                        };
+
+                        debounceBackup();
+                        assert.ok(statusSpan.textContent.includes('Changes detected'), 'Status shows pending save.');
+                        assert.ok(typeof scheduledTask === 'function', 'Scheduler captured callback.');
+
+                        scheduledTask();
+                        assert.equal(callCount, 1, 'performBackup invoked once when scheduled task runs.');
+                    });
+
+                    QUnit.test('debounceBackup resets the timer on rapid successive calls', assert => {
+                        assert.expect(3);
+                        let callCount = 0;
+                        const scheduledHandles = [];
+                        const cancelledHandles = new Set();
+
+                        testOverrides.performBackup = async () => {
+                            callCount++;
+                        };
+                        testOverrides.scheduleDebounce = callback => {
+                            const handle = { callback };
+                            scheduledHandles.push(handle);
+                            return handle;
+                        };
+                        testOverrides.cancelDebounce = handle => {
+                            cancelledHandles.add(handle);
+                        };
+
+                        debounceBackup();
+                        const firstHandle = scheduledHandles[0];
+                        debounceBackup();
+                        const secondHandle = scheduledHandles[1];
+                        debounceBackup();
+                        const finalHandle = scheduledHandles[2];
+
+                        assert.ok(cancelledHandles.has(firstHandle) && cancelledHandles.has(secondHandle), 'Earlier timers are cancelled.');
+
+                        finalHandle.callback();
+                        assert.equal(callCount, 1, 'Only last scheduled callback invokes performBackup.');
+                        assert.equal(cancelledHandles.size, 2, 'Exactly two timers were cancelled.');
+                    });
+                });
+
+                QUnit.module('Backup Persistence', hooks => {
+                    let runQueryOverrideSnapshot;
+                    let writeFileOverrideSnapshot;
+                    let originalDirHandle;
+
+                    hooks.beforeEach(() => {
+                        runQueryOverrideSnapshot = testOverrides.runQuery;
+                        writeFileOverrideSnapshot = testOverrides.writeFile;
+                        originalDirHandle = dirHandle;
+                    });
+
+                    hooks.afterEach(() => {
+                        testOverrides.runQuery = runQueryOverrideSnapshot;
+                        testOverrides.writeFile = writeFileOverrideSnapshot;
+                        dirHandle = originalDirHandle;
+                    });
+
+                    QUnit.test('performBackup logs warnings when no folder is linked', async assert => {
+                        dirHandle = null;
+                        const before = output.textContent;
+                        await performBackup();
+                        assert.ok(output.textContent.includes('Warning: DB changed but no folder selected for backup.'), 'Warning is emitted when directory is missing.');
+                        assert.equal(output.textContent.length > before.length, true, 'Log grows when warning is emitted.');
+                    });
+
+                    QUnit.test('performBackup writes schema and CSV snapshots for all tables', async assert => {
+                        const writes = [];
+                        dirHandle = {};
+                        testOverrides.runQuery = async sql => {
+                            if (sql.startsWith('SELECT sql')) {
+                                return {
+                                    columns: ['sql', 'name'],
+                                    rows: [
+                                        ['CREATE TABLE users (id INTEGER, name TEXT)', 'users'],
+                                        ['CREATE TABLE orders (id INTEGER, total REAL)', 'orders']
+                                    ]
+                                };
+                            }
+                            if (sql.includes('"users"')) {
+                                return { columns: ['id', 'name'], rows: [[1, 'Alice']] };
+                            }
+                            if (sql.includes('"orders"')) {
+                                return { columns: ['id', 'total'], rows: [[10, 42.5]] };
+                            }
+                            throw new Error('Unexpected SQL in test');
+                        };
+                        testOverrides.writeFile = async (filename, content) => {
+                            writes.push({ filename, content: content.trim() });
+                        };
+
+                        await performBackup();
+                        assert.deepEqual(writes.map(w => w.filename), ['schema.sql', 'users.csv', 'orders.csv'], 'Schema and every table export are written.');
+                        const schemaContent = writes.find(w => w.filename === 'schema.sql').content;
+                        assert.true(schemaContent.includes('CREATE TABLE users'), 'Schema contains users table DDL.');
+                        const userCsv = writes.find(w => w.filename === 'users.csv').content;
+                        assert.equal(userCsv, 'id,name\n1,Alice', 'User CSV mirrors query results.');
+                    });
+                });
+
+                QUnit.module('SQL Helpers', hooks => {
+                    let originalSqlite3;
+                    let originalDb;
+
+                    hooks.beforeEach(() => {
+                        originalSqlite3 = sqlite3;
+                        originalDb = db;
+                        db = {};
+                    });
+
+                    hooks.afterEach(() => {
+                        sqlite3 = originalSqlite3;
+                        db = originalDb;
+                    });
+
+                    QUnit.test('runQuery aggregates column names and rows', async assert => {
+                        const rows = [[1, 'Alice'], [2, 'Bob']];
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { index: 0 };
+                            },
+                            step: async stmt => {
+                                if (stmt.index < rows.length) {
+                                    stmt.index++;
+                                    return SQLite.SQLITE_ROW;
+                                }
+                                return SQLite.SQLITE_DONE;
+                            },
+                            column_names: () => ['id', 'name'],
+                            row: stmt => rows[stmt.index - 1]
+                        };
+
+                        const result = await runQuery('SELECT * FROM users');
+                        assert.deepEqual(result.columns, ['id', 'name'], 'Columns returned exactly once.');
+                        assert.deepEqual(result.rows, rows, 'Rows preserve order and values.');
+                    });
+
+                    QUnit.test('runExec steps through every prepared statement', async assert => {
+                        const executed = [];
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                executed.push(sql);
+                                yield {};
+                            },
+                            step: async () => SQLite.SQLITE_DONE
+                        };
+
+                        await runExec('DELETE FROM users;');
+                        assert.deepEqual(executed, ['DELETE FROM users;'], 'Each SQL string is forwarded to sqlite engine.');
+                    });
+                });
+
+                QUnit.module('Restore Logic', hooks => {
+                    let originalDirHandle;
+                    let runExecOverrideSnapshot;
+                    let importOverrideSnapshot;
+
+                    hooks.beforeEach(() => {
+                        originalDirHandle = dirHandle;
+                        runExecOverrideSnapshot = testOverrides.runExec;
+                        importOverrideSnapshot = testOverrides.importCSV;
+                    });
+
+                    hooks.afterEach(() => {
+                        dirHandle = originalDirHandle;
+                        testOverrides.runExec = runExecOverrideSnapshot;
+                        testOverrides.importCSV = importOverrideSnapshot;
+                    });
+
+                    QUnit.test('restoreDatabase no-ops when no directory is selected', async assert => {
+                        dirHandle = null;
+                        const before = output.textContent;
+                        await restoreDatabase();
+                        assert.equal(output.textContent, before, 'No log changes occur without a directory.');
+                    });
+
+                    QUnit.test('restoreDatabase logs when schema.sql is missing', async assert => {
+                        dirHandle = {
+                            getFileHandle: async () => {
+                                throw new Error('NotFoundError');
+                            }
+                        };
+                        await restoreDatabase();
+                        assert.ok(output.textContent.includes('No schema.sql found. Starting fresh.'), 'Missing schema surfaces an informational log.');
+                    });
+
+                    QUnit.test('restoreDatabase applies schema and imports CSV payloads', async assert => {
+                        const execCalls = [];
+                        const imports = [];
+                        dirHandle = {
+                            getFileHandle: async () => ({
+                                getFile: async () => ({
+                                    text: async () => 'CREATE TABLE users (id INTEGER);'
+                                })
+                            }),
+                            entries: async function* () {
+                                yield ['users.csv', {
+                                    getFile: async () => ({ text: async () => 'id,name\n1,Alice' })
+                                }];
+                                yield ['notes.txt', {
+                                    getFile: async () => ({ text: async () => 'ignore' })
+                                }];
+                            }
+                        };
+                        testOverrides.runExec = async sql => {
+                            execCalls.push(sql.trim());
+                        };
+                        testOverrides.importCSV = async (table, csvText) => {
+                            imports.push({ table, csvText: csvText.trim() });
+                        };
+
+                        await restoreDatabase();
+                        assert.deepEqual(execCalls, ['CREATE TABLE users (id INTEGER);'], 'Schema SQL replays through runExec.');
+                        assert.deepEqual(imports, [{ table: 'users', csvText: 'id,name\n1,Alice' }], 'CSV files are passed to importCSV with table names.');
+                    });
+                });
+
+                QUnit.module('CSV Import', hooks => {
+                    let originalSqlite3;
+                    let runExecOverrideSnapshot;
+                    let originalDb;
+
+                    hooks.beforeEach(() => {
+                        originalSqlite3 = sqlite3;
+                        runExecOverrideSnapshot = testOverrides.runExec;
+                        originalDb = db;
+                        db = {};
+                    });
+
+                    hooks.afterEach(() => {
+                        sqlite3 = originalSqlite3;
+                        testOverrides.runExec = runExecOverrideSnapshot;
+                        db = originalDb;
+                    });
+
+                    QUnit.test('importCSV inserts rows and wraps them in a transaction', async assert => {
+                        const execCalls = [];
+                        const executedStatements = [];
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                const stmt = { sql, bindings: [] };
+                                executedStatements.push(stmt);
+                                yield stmt;
+                            },
+                            bind: (stmt, idx, val) => {
+                                stmt.bindings[idx - 1] = val;
+                            },
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async sql => {
+                            execCalls.push(sql);
+                        };
+
+                        await importCSV('users', 'id,name\n1,Alice\n2,Bob');
+                        assert.deepEqual(execCalls, ['BEGIN TRANSACTION;', 'COMMIT;'], 'Transaction boundaries executed.');
+                        assert.equal(executedStatements.length, 2, 'One insert per populated row.');
+                        assert.deepEqual(executedStatements[0].bindings, ['1', 'Alice'], 'First row bound correctly.');
+                        assert.deepEqual(executedStatements[1].bindings, ['2', 'Bob'], 'Second row bound correctly.');
+                    });
+
+                    QUnit.test('importCSV skips rows that contain no data', async assert => {
+                        const executedStatements = [];
+                        sqlite3 = {
+                            statements: async function* (_db, sql) {
+                                const stmt = { sql, bindings: [] };
+                                executedStatements.push(stmt);
+                                yield stmt;
+                            },
+                            bind: (stmt, idx, val) => {
+                                stmt.bindings[idx - 1] = val;
+                            },
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async () => {};
+
+                        await importCSV('users', 'id,name\n,\n3,Charlie');
+                        assert.equal(executedStatements.length, 1, 'Only the populated row is inserted.');
+                        assert.deepEqual(executedStatements[0].bindings, ['3', 'Charlie'], 'Values from the populated row are preserved.');
+                    });
+
+                    QUnit.test('importCSV reports malformed CSV payloads', async assert => {
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { sql: '' };
+                            },
+                            bind: () => {},
+                            step: async () => {}
+                        };
+                        testOverrides.runExec = async () => {};
+
+                        await assert.rejects(importCSV('broken', '"unterminated'), /CSV parse error/, 'Parser failure surfaces to the caller.');
+                    });
+
+                    QUnit.test('importCSV logs and returns when headers are missing', async assert => {
+                        sqlite3 = {
+                            statements: async function* () {
+                                yield { sql: '' };
+                            },
+                            bind: () => {},
+                            step: async () => {}
+                        };
+                        const before = output.textContent;
+                        const originalParse = Papa.parse;
+                        try {
+                            Papa.parse = () => ({
+                                data: [],
+                                errors: [],
+                                meta: { fields: [] }
+                            });
+
+                            await importCSV('empty', 'id,name');
+                        } finally {
+                            Papa.parse = originalParse;
+                        }
+
+                        assert.ok(output.textContent.includes("CSV 'empty.csv' missing header. Skipping."), 'Header check alerts user.');
+                        assert.equal(output.textContent.length > before.length, true, 'Log updated for missing header.');
+                    });
+                });
+            } else {
+                QUnit.config.autostart = false;
+            }
+        }
 
     </script>
 </body>
