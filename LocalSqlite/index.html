@@ -52,6 +52,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite-async.mjs';
         import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/src/sqlite-api.js';
         import Papa from 'https://cdn.jsdelivr.net/npm/papaparse@5.4.1/+esm';
+        import { OPFSCoopSyncVFS } from 'https://rhashimoto.github.io/wa-sqlite/src/examples/OPFSCoopSyncVFS.js';
 
         let sqlite3;
         let db;
@@ -68,9 +69,18 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         const isTestMode = urlParams.get('test') === 'true';
         const testOverrides = Object.create(null);
         const schemaMutationRegex = /\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b/i;
+        const OPFS_DB_FILENAME = '/local-backend/my-db.sqlite';
+        const OPFS_DB_FLAGS = SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE;
 
         const containsSchemaMutation = sql => schemaMutationRegex.test(sql);
         const escapeIdentifier = identifier => `"${String(identifier).replace(/"/g, '""')}"`;
+
+        async function openOpfsDatabase(moduleInstance, sqliteApi = sqlite3, VfsCtor = OPFSCoopSyncVFS) {
+            if (!sqliteApi) throw new Error('SQLite API not initialized');
+            const vfs = await VfsCtor.create('opfs', moduleInstance);
+            sqliteApi.vfs_register(vfs, true);
+            return sqliteApi.open_v2(OPFS_DB_FILENAME, OPFS_DB_FLAGS, vfs.name);
+        }
 
         // --- 1. Initialization ---
 
@@ -78,13 +88,11 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
             log("Loading WebAssembly...");
             const module = await SQLiteESMFactory();
             sqlite3 = SQLite.Factory(module);
-            
-            // Open a memory database. We rely on file sync for persistence.
-            db = await sqlite3.open_v2('my-db', 
-                SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE | SQLite.SQLITE_OPEN_MEMORY
-            );
-            
-            log("SQLite ready in memory.");
+
+            // Open an OPFS-backed database so writes persist between sessions.
+            db = await openOpfsDatabase(module);
+
+            log("SQLite ready with OPFS persistence.");
             btnRun.disabled = false;
             
             // Register an update hook to detect data changes and trigger auto-save.
@@ -396,6 +404,37 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         if (window.QUnit) {
             if (isTestMode) {
                 document.body.classList.add('testing');
+
+                QUnit.module('OPFS Database', () => {
+                    QUnit.test('openOpfsDatabase registers OPFS VFS and opens persistent db', async assert => {
+                        assert.expect(8);
+                        const moduleStub = Symbol('module');
+                        const fakeDbHandle = {};
+                        const fakeVfsInstance = { name: 'fake-opfs' };
+                        const fakeVfsClass = {
+                            async create(name, moduleArg) {
+                                assert.equal(name, 'opfs', 'uses deterministic VFS name.');
+                                assert.strictEqual(moduleArg, moduleStub, 'passes module into VFS factory.');
+                                return fakeVfsInstance;
+                            }
+                        };
+                        const fakeSqlite = {
+                            vfs_register(vfs, makeDefault) {
+                                assert.strictEqual(vfs, fakeVfsInstance, 'registers returned VFS instance.');
+                                assert.ok(makeDefault, 'marks OPFS VFS as default.');
+                            },
+                            open_v2: async (filename, flags, vfsName) => {
+                                assert.strictEqual(filename, OPFS_DB_FILENAME, 'uses OPFS database path.');
+                                assert.strictEqual(flags, OPFS_DB_FLAGS, 'enables read/write persistence.');
+                                assert.strictEqual(vfsName, fakeVfsInstance.name, 'targets registered VFS.');
+                                return fakeDbHandle;
+                            }
+                        };
+
+                        const dbHandle = await openOpfsDatabase(moduleStub, fakeSqlite, fakeVfsClass);
+                        assert.strictEqual(dbHandle, fakeDbHandle, 'returns handle from sqlite.open_v2.');
+                    });
+                });
 
                 QUnit.module('CSV Helpers', () => {
                     QUnit.test('convertToCSV serializes headers and rows', assert => {
