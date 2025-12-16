@@ -22,15 +22,13 @@
 
     <h1>Backendless SQLite + Local Backup</h1>
     <p>
-        1. Click <b>Select Backup Folder</b> to grant write access.<br>
-        2. Click <b>Initialize/Restore</b> to load existing CSVs/Schema from that folder (if any).<br>
-        3. Run SQL. Any change will auto-save CSVs and Schema to the disk.
+        1. Click <b>Select Backup Folder</b> to grant write access and automatically restore any CSVs/Schema stored there.<br>
+        2. Run SQL. Any change will auto-save CSVs and Schema to the disk.
     </p>
 
     <!-- Controls -->
     <div style="margin-bottom: 20px;">
         <button id="btnSelectDir">1. Select Backup Folder</button>
-        <button id="btnRestore" disabled>2. Initialize / Restore from Folder</button>
         <span id="status" style="margin-left: 10px; font-weight: bold; color: gray;">Waiting...</span>
     </div>
 
@@ -62,7 +60,6 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
         // UI References
         const btnSelectDir = document.getElementById('btnSelectDir');
-        const btnRestore = document.getElementById('btnRestore');
         const btnRun = document.getElementById('btnRun');
         const sqlInput = document.getElementById('sqlInput');
         const output = document.getElementById('output');
@@ -100,25 +97,34 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
         btnSelectDir.addEventListener('click', async () => {
             try {
-                // Request access to a folder
-                dirHandle = await window.showDirectoryPicker();
-                log(`Selected directory: ${dirHandle.name}`);
-                btnRestore.disabled = false;
-                statusSpan.textContent = "Folder Linked.";
-                statusSpan.style.color = "blue";
+                const handle = await window.showDirectoryPicker();
+                await linkDirectory(handle);
             } catch (err) {
                 log("Error selecting directory: " + err.message);
             }
         });
 
-        btnRestore.addEventListener('click', async () => {
-            if (!dirHandle) return;
+        async function linkDirectory(handle) {
+            if (!handle) return;
+            dirHandle = handle;
+            log(`Selected directory: ${dirHandle.name}`);
             statusSpan.textContent = "Restoring...";
-            await restoreDatabase();
-            btnRun.disabled = false;
-            statusSpan.textContent = "Ready.";
-            statusSpan.style.color = "green";
-        });
+            statusSpan.style.color = "orange";
+
+            try {
+                const restored = await restoreDatabase();
+                if (restored) {
+                    statusSpan.textContent = "Ready.";
+                    statusSpan.style.color = "green";
+                } else {
+                    statusSpan.textContent = "Folder Linked. No prior backup.";
+                    statusSpan.style.color = "blue";
+                }
+            } catch (err) {
+                statusSpan.textContent = "Restore Failed.";
+                statusSpan.style.color = "red";
+            }
+        }
 
         // --- 3. Database Operations ---
 
@@ -238,7 +244,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         // --- 5. Restore Logic (Import) ---
 
         async function restoreDatabase() {
-            if (!dirHandle) return;
+            if (!dirHandle) return false;
 
             try {
                 // A. Load Schema
@@ -247,7 +253,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                     schemaFile = await dirHandle.getFileHandle('schema.sql');
                 } catch(e) {
                     log("No schema.sql found. Starting fresh.");
-                    return;
+                    return false;
                 }
 
                 const file = await schemaFile.getFile();
@@ -273,9 +279,11 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                     }
                 }
 
+                return true;
             } catch (err) {
                 log("Restore Error: " + err.message);
                 console.error(err);
+                throw err;
             }
         }
 
@@ -445,6 +453,61 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
 
                         await writeFile('demo.txt', 'payload');
                         assert.deepEqual(writes, [{ filename: 'demo.txt', content: 'payload' }], 'writeFile forwards the entire buffer.');
+                    });
+                });
+
+                QUnit.module('Directory Linking', hooks => {
+                    let originalRestoreDatabase;
+                    let originalDirHandle;
+
+                    hooks.beforeEach(() => {
+                        originalRestoreDatabase = restoreDatabase;
+                        originalDirHandle = dirHandle;
+                        output.textContent = '';
+                        statusSpan.textContent = 'Waiting...';
+                        statusSpan.style.color = 'gray';
+                    });
+
+                    hooks.afterEach(() => {
+                        restoreDatabase = originalRestoreDatabase;
+                        dirHandle = originalDirHandle;
+                    });
+
+                    QUnit.test('linkDirectory automatically restores existing backups', async assert => {
+                        assert.expect(4);
+                        const fakeHandle = { name: 'backup-folder' };
+                        let restoreCalls = 0;
+                        restoreDatabase = async () => {
+                            restoreCalls++;
+                            return true;
+                        };
+
+                        await linkDirectory(fakeHandle);
+
+                        assert.equal(dirHandle, fakeHandle, 'Directory handle persists globally.');
+                        assert.equal(restoreCalls, 1, 'restoreDatabase invoked once.');
+                        assert.equal(statusSpan.textContent, 'Ready.', 'Status indicates successful restore.');
+                        assert.equal(statusSpan.style.color, 'green', 'Success state uses green accent.');
+                    });
+
+                    QUnit.test('linkDirectory reports when no prior backup exists', async assert => {
+                        restoreDatabase = async () => false;
+
+                        await linkDirectory({ name: 'empty-folder' });
+
+                        assert.equal(statusSpan.textContent, 'Folder Linked. No prior backup.', 'Status communicates empty backup folder.');
+                        assert.equal(statusSpan.style.color, 'blue', 'Info state uses blue accent.');
+                    });
+
+                    QUnit.test('linkDirectory surfaces restore failures in the status indicator', async assert => {
+                        restoreDatabase = async () => {
+                            throw new Error('boom');
+                        };
+
+                        await linkDirectory({ name: 'broken-folder' });
+
+                        assert.equal(statusSpan.textContent, 'Restore Failed.', 'Status reflects restore failure.');
+                        assert.equal(statusSpan.style.color, 'red', 'Failure state uses red accent.');
                     });
                 });
 
