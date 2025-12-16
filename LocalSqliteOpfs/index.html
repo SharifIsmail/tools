@@ -1,0 +1,372 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OPFS-backed SQLite Console</title>
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
+    <style>
+        #qunit,
+        #qunit-fixture {
+            display: none;
+        }
+
+        body.testing #qunit,
+        body.testing #qunit-fixture {
+            display: block;
+            margin-top: 20px;
+        }
+    </style>
+</head>
+<body>
+
+    <h1>SQLite + OPFS Persistence</h1>
+    <p>
+        1. Click <b>Initialize OPFS Storage</b> to grant access and restore the on-disk <code>.sqlite</code> file.<br>
+        2. Run SQL. All changes write directly into the OPFS-backed database file.
+    </p>
+
+    <div style="margin-bottom: 20px;">
+        <button id="btnSelectDir">1. Initialize OPFS Storage</button>
+        <span id="status" style="margin-left: 10px; font-weight: bold; color: gray;">Waiting for OPFS init...</span>
+    </div>
+
+    <textarea id="sqlInput" rows="5" cols="80" placeholder="ENTER SQL HERE (e.g., CREATE TABLE... or INSERT...)">
+CREATE TABLE IF NOT EXISTS users (id INTEGER PRIMARY KEY, name TEXT, email TEXT);
+INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
+    </textarea>
+    <br>
+    <button id="btnRun" disabled>Run SQL</button>
+
+    <h3>Results / Logs:</h3>
+    <pre id="output" style="background: #f0f0f0; padding: 10px; min-height: 100px; border: 1px solid #ccc;"></pre>
+
+    <div id="qunit"></div>
+    <div id="qunit-fixture"></div>
+
+    <script src="https://code.jquery.com/qunit/qunit-2.20.0.js"></script>
+    <script type="module">
+        import SQLiteESMFactory from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/dist/wa-sqlite-async.mjs';
+        import * as SQLite from 'https://cdn.jsdelivr.net/npm/wa-sqlite@1.0.0/src/sqlite-api.js';
+        import { OPFSAnyContextVFS } from 'https://cdn.jsdelivr.net/gh/rhashimoto/wa-sqlite@master/src/examples/OPFSAnyContextVFS.js';
+
+        const DB_PATH = '/wa-sqlite/local-db.sqlite';
+        const VFS_NAME = 'opfs-any-context';
+        let sqlite3;
+        let wasmModule;
+        let db;
+        let vfsRegistered = false;
+        let initPromise = null;
+
+        const btnSelectDir = document.getElementById('btnSelectDir');
+        const btnRun = document.getElementById('btnRun');
+        const sqlInput = document.getElementById('sqlInput');
+        const output = document.getElementById('output');
+        const statusSpan = document.getElementById('status');
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTestMode = urlParams.get('test') === 'true';
+        const testOverrides = Object.create(null);
+
+        const OPEN_FLAGS = SQLite.SQLITE_OPEN_READWRITE | SQLite.SQLITE_OPEN_CREATE;
+
+        function setStatus(message, color = 'gray') {
+            statusSpan.textContent = message;
+            statusSpan.style.color = color;
+        }
+
+        function log(msg) {
+            output.textContent += msg + '\n';
+            output.scrollTop = output.scrollHeight;
+        }
+
+        async function initSQLite() {
+            if (sqlite3) {
+                return sqlite3;
+            }
+            if (isTestMode && typeof testOverrides.initSQLite === 'function') {
+                return testOverrides.initSQLite();
+            }
+            setStatus('Loading SQLite runtime...', 'orange');
+            wasmModule = await SQLiteESMFactory();
+            sqlite3 = SQLite.Factory(wasmModule);
+            log('SQLite runtime loaded. Initialize OPFS to continue.');
+            return sqlite3;
+        }
+
+        async function registerVfs() {
+            if (vfsRegistered) {
+                return;
+            }
+            const factory = (isTestMode && typeof testOverrides.createVfs === 'function')
+                ? testOverrides.createVfs
+                : () => OPFSAnyContextVFS.create(VFS_NAME, wasmModule);
+            const vfs = await factory(VFS_NAME, wasmModule);
+            if (isTestMode && typeof testOverrides.vfsRegister === 'function') {
+                await testOverrides.vfsRegister(vfs);
+            } else {
+                sqlite3.vfs_register(vfs, true);
+            }
+            vfsRegistered = true;
+        }
+
+        async function ensureDatabase() {
+            if (db) {
+                setStatus('Ready.', 'green');
+                return db;
+            }
+            if (initPromise) {
+                return initPromise;
+            }
+
+            initPromise = (async () => {
+                setStatus('Preparing OPFS-backed database...', 'orange');
+                try {
+                    await initSQLite();
+                    await registerVfs();
+
+                    const openDatabase = (isTestMode && typeof testOverrides.openDatabase === 'function')
+                        ? testOverrides.openDatabase
+                        : () => sqlite3.open_v2(DB_PATH, OPEN_FLAGS, VFS_NAME);
+
+                    db = await openDatabase();
+                    sqlite3.update_hook(db, () => {
+                        setStatus('Changes persisted to OPFS.', 'green');
+                    });
+                    btnRun.disabled = false;
+                    setStatus('Ready.', 'green');
+                    log('OPFS-backed SQLite ready.');
+                    return db;
+                } catch (err) {
+                    setStatus('Init failed.', 'red');
+                    log('Initialization error: ' + err.message);
+                    throw err;
+                }
+            })();
+
+            try {
+                return await initPromise;
+            } finally {
+                initPromise = null;
+            }
+        }
+
+        async function runQuery(sql, targetDb = db) {
+            if (isTestMode && typeof testOverrides.runQuery === 'function') {
+                return testOverrides.runQuery(sql, targetDb);
+            }
+            if (!targetDb) {
+                throw new Error('Database not initialized');
+            }
+            let columns = [];
+            const rows = [];
+            for await (const stmt of sqlite3.statements(targetDb, sql)) {
+                while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+                    if (columns.length === 0) {
+                        columns = sqlite3.column_names(stmt);
+                    }
+                    rows.push(sqlite3.row(stmt));
+                }
+            }
+            return { columns, rows };
+        }
+
+        async function runExec(sql, targetDb = db) {
+            if (isTestMode && typeof testOverrides.runExec === 'function') {
+                return testOverrides.runExec(sql, targetDb);
+            }
+            if (!targetDb) {
+                throw new Error('Database not initialized');
+            }
+            for await (const stmt of sqlite3.statements(targetDb, sql)) {
+                await sqlite3.step(stmt);
+            }
+        }
+
+        btnSelectDir.addEventListener('click', async () => {
+            try {
+                await ensureDatabase();
+            } catch (err) {
+                // error already logged
+            }
+        });
+
+        btnRun.addEventListener('click', async () => {
+            const sql = sqlInput.value;
+            if (!sql.trim()) {
+                log('Please enter SQL to execute.');
+                return;
+            }
+
+            try {
+                await ensureDatabase();
+                const results = [];
+                for await (const stmt of sqlite3.statements(db, sql)) {
+                    let columns = [];
+                    const rows = [];
+                    while (await sqlite3.step(stmt) === SQLite.SQLITE_ROW) {
+                        columns = sqlite3.column_names(stmt);
+                        rows.push(sqlite3.row(stmt));
+                    }
+                    if (columns.length > 0) {
+                        results.push({ columns, rows });
+                    }
+                }
+                if (results.length === 0) {
+                    log('Query executed successfully (No output rows).');
+                } else {
+                    log(JSON.stringify(results, null, 2));
+                }
+            } catch (err) {
+                log('SQL Error: ' + err.message);
+            }
+        });
+
+        if (!isTestMode) {
+            initSQLite().catch(err => {
+                log('Failed to load SQLite: ' + err.message);
+                setStatus('Load failed.', 'red');
+            });
+        }
+
+        if (window.QUnit) {
+            if (isTestMode) {
+                document.body.classList.add('testing');
+
+                QUnit.module('Logger', hooks => {
+                    hooks.beforeEach(() => {
+                        output.textContent = '';
+                    });
+
+                    QUnit.test('log appends newline-delimited entries', assert => {
+                        log('Alpha');
+                        log('Beta');
+                        const lines = output.textContent.trim().split('\n');
+                        assert.deepEqual(lines, ['Alpha', 'Beta'], 'Messages preserve order.');
+                    });
+                });
+
+                QUnit.module('Initialization Flow', hooks => {
+                    let originalSqlite3;
+                    let originalDb;
+                    let originalModule;
+                    let originalVfsFlag;
+
+                    hooks.beforeEach(() => {
+                        originalSqlite3 = sqlite3;
+                        originalDb = db;
+                        originalModule = wasmModule;
+                        originalVfsFlag = vfsRegistered;
+                        sqlite3 = {
+                            statements: async function* () { },
+                            step: async () => SQLite.SQLITE_DONE,
+                            column_names: () => [],
+                            row: () => [],
+                            vfs_register: () => { registeredCount++; },
+                            open_v2: async () => ({ connection: 'db' }),
+                            update_hook: () => { }
+                        };
+                        wasmModule = { tag: 'test' };
+                        db = null;
+                        vfsRegistered = false;
+                        btnRun.disabled = true;
+                        registeredCount = 0;
+                        testOverrides.initSQLite = async () => sqlite3;
+                        testOverrides.createVfs = async () => ({ vfs: true });
+                        testOverrides.openDatabase = async () => ({ connection: 'db' });
+                    });
+
+                    hooks.afterEach(() => {
+                        sqlite3 = originalSqlite3;
+                        db = originalDb;
+                        wasmModule = originalModule;
+                        vfsRegistered = originalVfsFlag;
+                        delete testOverrides.initSQLite;
+                        delete testOverrides.createVfs;
+                        delete testOverrides.openDatabase;
+                        delete testOverrides.vfsRegister;
+                    });
+
+                    let registeredCount = 0;
+
+                    QUnit.test('ensureDatabase registers VFS and opens once', async assert => {
+                        assert.expect(5);
+                        await ensureDatabase();
+                        await ensureDatabase();
+                        assert.equal(btnRun.disabled, false, 'Run button enabled after init.');
+                        assert.ok(statusSpan.textContent.includes('Ready'), 'Status indicates ready state.');
+                        assert.equal(vfsRegistered, true, 'VFS flagged as registered.');
+                        assert.equal(registeredCount, 1, 'VFS registered exactly once.');
+                        assert.deepEqual(db, { connection: 'db' }, 'Database handle retained.');
+                    });
+
+                    QUnit.test('ensureDatabase surfaces initialization errors', async assert => {
+                        assert.expect(2);
+                        testOverrides.openDatabase = async () => { throw new Error('boom'); };
+                        try {
+                            await ensureDatabase();
+                        } catch (err) {
+                            assert.ok(statusSpan.textContent.includes('Init failed'), 'Status reflects failure.');
+                            assert.equal(err.message, 'boom', 'Error bubbles to caller.');
+                        }
+                    });
+                });
+
+                QUnit.module('SQL Helpers', hooks => {
+                    let originalSqlite3;
+                    let originalDb;
+
+                    hooks.beforeEach(() => {
+                        originalSqlite3 = sqlite3;
+                        originalDb = db;
+                        db = {};
+                        const rows = [[1, 'Alice'], [2, 'Bob']];
+                        sqlite3 = {
+                            statements: async function* () {
+                                const stmt = { index: 0 };
+                                yield stmt;
+                            },
+                            step: async stmt => {
+                                if (!stmt.iter) {
+                                    stmt.iter = 0;
+                                }
+                                if (stmt.iter < rows.length) {
+                                    stmt.iter++;
+                                    stmt.current = rows[stmt.iter - 1];
+                                    return SQLite.SQLITE_ROW;
+                                }
+                                return SQLite.SQLITE_DONE;
+                            },
+                            column_names: () => ['id', 'name'],
+                            row: stmt => stmt.current
+                        };
+                    });
+
+                    hooks.afterEach(() => {
+                        sqlite3 = originalSqlite3;
+                        db = originalDb;
+                    });
+
+                    QUnit.test('runQuery returns columns and rows', async assert => {
+                        const result = await runQuery('SELECT * FROM users');
+                        assert.deepEqual(result.columns, ['id', 'name'], 'Columns preserved.');
+                        assert.deepEqual(result.rows, [[1, 'Alice'], [2, 'Bob']], 'Rows preserved.');
+                    });
+
+                    QUnit.test('runExec iterates through statements', async assert => {
+                        const executed = [];
+                        sqlite3.statements = async function* (_db, sql) {
+                            executed.push(sql);
+                            yield {};
+                        };
+                        sqlite3.step = async () => SQLite.SQLITE_DONE;
+                        await runExec('DELETE FROM users');
+                        assert.deepEqual(executed, ['DELETE FROM users'], 'SQL forwarded to engine.');
+                    });
+                });
+            } else {
+                QUnit.config.autostart = false;
+            }
+        }
+    </script>
+</body>
+</html>
