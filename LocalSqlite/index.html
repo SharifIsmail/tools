@@ -73,6 +73,7 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
         const schemaMutationRegex = /\b(?:CREATE|DROP|ALTER)\s+(?:TABLE|INDEX|VIEW|TRIGGER)\b/i;
 
         const containsSchemaMutation = sql => schemaMutationRegex.test(sql);
+        const escapeIdentifier = identifier => `"${String(identifier).replace(/"/g, '""')}"`;
 
         // --- 1. Initialization ---
 
@@ -349,8 +350,8 @@ INSERT INTO users (name, email) VALUES ('Alice', 'alice@example.com');
                 for (const record of dataRows) {
                     const values = columns.map(col => record[col] ?? null);
                     const placeholders = columns.map(() => '?').join(',');
-                    const columnList = columns.map(col => `"${col}"`).join(',');
-                    const sql = `INSERT INTO "${tableName}" (${columnList}) VALUES (${placeholders})`;
+                    const columnList = columns.map(col => escapeIdentifier(col)).join(',');
+                    const sql = `INSERT INTO ${escapeIdentifier(tableName)} (${columnList}) VALUES (${placeholders})`;
 
                     for await (const stmt of sqlite3.statements(db, sql)) {
                         values.forEach((val, idx) => {
