@@ -367,16 +367,21 @@
         async function loadDriveFile(fileId, fileName) {
             setStatus('loading', 'Loading...');
             try {
-                const response = (isTestMode && testOverrides.getFile)
-                    ? await testOverrides.getFile(fileId)
-                    : await gapi.client.drive.files.get({
-                        fileId: fileId,
-                        alt: 'media'
-                    });
+                // Parallel fetch: Metadata (for parents) + Content
+                // We mock these efficiently in tests
+                const [metaResp, contentResp] = await Promise.all([
+                    (isTestMode && testOverrides.getFileMeta)
+                        ? testOverrides.getFileMeta(fileId)
+                        : gapi.client.drive.files.get({ fileId: fileId, fields: 'parents, name' }),
+                    (isTestMode && testOverrides.getFile)
+                        ? testOverrides.getFile(fileId)
+                        : gapi.client.drive.files.get({ fileId: fileId, alt: 'media' })
+                ]);
 
-                const fullText = response.body;
+                const meta = isTestMode ? metaResp : metaResp.result;
+                const fullText = isTestMode ? contentResp.body : contentResp.body;
 
-                // Initialize Editor (Destroy first to clear old state, but we must re-set state after)
+                // Initialize Editor (Destroy first)
                 await destroyEditor();
 
                 // --- FRONTMATTER HANDLING ---
@@ -384,11 +389,21 @@
                 currentFrontmatter = frontmatter;
                 currentFileId = fileId;
 
+                // --- IMAGE HANDLING ---
+                // We need the parent folder to look for sibling images
+                let parentId = (meta.parents && meta.parents.length > 0) ? meta.parents[0] : null;
+
+                let displayBody = body;
+                if (parentId) {
+                    setStatus('loading', 'Loading images...');
+                    displayBody = await resolveImages(body, parentId);
+                }
+
                 // UI Updates
                 fileNameSpan.textContent = fileName;
                 setStatus('ready', 'Ready');
 
-                await createEditor(body);
+                await createEditor(displayBody);
 
                 // Highlight active in list
                 document.querySelectorAll('#file-list li').forEach(li => li.classList.remove('active'));
@@ -397,7 +412,7 @@
 
             } catch (err) {
                 console.error(err);
-                setStatus('error', 'Load Failed');
+                setStatus('error', 'Load Failed: ' + (err.result?.error?.message || err.message));
             }
         }
 
@@ -408,8 +423,11 @@
             setStatus('saving', 'Saving...');
 
             try {
+                // Restore original image paths
+                const originalContent = restoreImages(content);
+
                 // Re-attach frontmatter
-                const finalContent = currentFrontmatter + content;
+                const finalContent = currentFrontmatter + originalContent;
 
                 if (isTestMode && testOverrides.updateFile) {
                     await testOverrides.updateFile(currentFileId, finalContent);
@@ -429,6 +447,141 @@
             } finally {
                 isSaving = false;
             }
+        }
+
+        // Helper to fetch blob (wrapper for easy mocking)
+        async function fetchBlob(url, headers) {
+            if (isTestMode && testOverrides.fetchBlob) {
+                return testOverrides.fetchBlob(url, headers);
+            }
+            const resp = await fetch(url, { headers });
+            if (!resp.ok) throw new Error('Fetch failed');
+            return resp.blob();
+        }
+
+        // --- Image Handling Helpers ---
+        let imageMap = new Map(); // blobUrl -> originalPath
+
+        // Recursively find file ID by path (e.g. "Assets/img.png") starting from parentId
+        async function findFileIdByPath(parentId, path) {
+            const parts = path.split('/');
+            let currentId = parentId;
+
+            for (let i = 0; i < parts.length; i++) {
+                const name = parts[i];
+                const isLast = i === parts.length - 1;
+                const safeName = name.replace(/'/g, "\\'");
+
+                // For folders, we need distinct query? strictly speaking, files and folders are just files with mimeTypes.
+                // But generally we just look for name and parent.
+                const q = `'${currentId}' in parents and name = '${safeName}' and trashed = false`;
+
+                const listResp = (isTestMode && testOverrides.listFiles)
+                    ? await testOverrides.listFiles(q)
+                    : await gapi.client.drive.files.list({
+                        q: q,
+                        fields: 'files(id, name, mimeType)',
+                        pageSize: 1
+                    });
+
+                const files = listResp.result.files;
+                if (!files || files.length === 0) {
+                    console.warn(`[MilkdownImage] Path segment not found: ${name} in ${currentId}`);
+                    return null;
+                }
+
+                // If duplicates, take first. Ideally prioritize folders if we are in middle of path.
+                // If not lsast, we expect a folder.
+                let match = files[0];
+                if (!isLast) {
+                    match = files.find(f => f.mimeType === 'application/vnd.google-apps.folder') || files[0];
+                }
+
+                currentId = match.id;
+            }
+            return currentId;
+        }
+
+        async function resolveImages(markdown, parentId) {
+            imageMap.clear();
+            const regex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+            let match;
+            const updates = [];
+
+            // 1. Find all local images
+            while ((match = regex.exec(markdown)) !== null) {
+                const [fullMatch, alt, src] = match;
+                if (!src.startsWith('http') && !src.startsWith('data:')) {
+                    updates.push({ fullMatch, alt, src });
+                }
+            }
+
+            if (updates.length === 0) return markdown;
+
+            // 2. Fetch blobs for each unique local image
+            // We use a Set to avoid fetching same image twice
+            const uniqueSrcs = [...new Set(updates.map(u => u.src))];
+            const urlMap = {}; // src -> blobUrl
+
+            console.log('[MilkdownImage] Resolving images in parent:', parentId, uniqueSrcs);
+            if (!parentId) {
+                console.warn('[MilkdownImage] No parent ID found, cannot resolve sibling images.');
+                return markdown;
+            }
+
+            await Promise.all(uniqueSrcs.map(async (src) => {
+                try {
+                    // Resolve nested path
+                    const fileId = await findFileIdByPath(parentId, src);
+
+                    if (fileId) {
+                        console.log(`[MilkdownImage] Found ${src} -> ${fileId}`);
+
+                        // Fetch content as blob
+                        const token = (isTestMode ? 'mock-token' : gapi.client.getToken().access_token);
+
+                        const blob = await fetchBlob(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                            'Authorization': `Bearer ${token}`
+                        });
+
+                        const blobUrl = URL.createObjectURL(blob);
+                        urlMap[src] = blobUrl;
+                        imageMap.set(blobUrl, src);
+                    } else {
+                        console.warn(`[MilkdownImage] Image not found in Drive: ${src}`);
+                    }
+                } catch (e) {
+                    console.warn(`[MilkdownImage] Failed to load image ${src}`, e);
+                }
+            }));
+
+            // 3. Replace in markdown
+            let newMarkdown = markdown;
+            updates.forEach(({ fullMatch, alt, src }) => {
+                if (urlMap[src]) {
+                    // Use replace with string to avoid regex special char issues in src
+                    // But we must match the exact instance.
+                    // To be safe, we rebuild the string or use global replace carefully.
+                    // Since we iterate findings, naive replace might replace wrong instance if duplicates exist.
+                    // But here we want to replace ALL instances of valid relative path with the blob.
+                    // So global replace of the path is actually what we want.
+                    // Caution: ensure we don't replace partial strings?
+                    // simpler: replace the whole tag `![alt](src)` -> `![alt](blobUrl)`
+                    const newTag = `![${alt}](${urlMap[src]})`;
+                    newMarkdown = newMarkdown.split(fullMatch).join(newTag);
+                }
+            });
+
+            return newMarkdown;
+        }
+
+        function restoreImages(markdown) {
+            let newMarkdown = markdown;
+            // Iterate map and replace blobUrls back to original
+            for (const [blobUrl, originalSrc] of imageMap.entries()) {
+                newMarkdown = newMarkdown.split(blobUrl).join(originalSrc);
+            }
+            return newMarkdown;
         }
 
         /*******************************************************
@@ -609,10 +762,18 @@
                     const mockId = '123';
                     const mockContent = "---\nmeta: true\n---\n# Body";
 
+                    testOverrides.getFileMeta = async (id) => {
+                        assert.equal(id, mockId);
+                        return { result: { parents: ['folder1'], name: 'Test.md' } };
+                    };
+
                     testOverrides.getFile = async (id) => {
                         assert.equal(id, mockId);
                         return { body: mockContent };
                     };
+
+                    // Allow images to skip if no files found
+                    testOverrides.listFiles = async () => ({ result: { files: [] } });
 
                     testOverrides.createEditor = async (content) => {
                         assert.equal(content, "# Body", "Editor received only body");
@@ -641,6 +802,73 @@
 
                     await saveDriveFile(newContent);
                     assert.ok(statusSpan.className.includes('saved'), 'Status becomes saved');
+                });
+            });
+
+            QUnit.module('Image Handling', hooks => {
+                hooks.beforeEach(() => {
+                    imageMap = new Map();
+                });
+
+                QUnit.test('resolveImages replaces local paths with blobs', async assert => {
+                    const done = assert.async();
+                    const markdown = "![img1](test.png) ![img2](assets/icon.png)";
+                    const mockParent = "folder123";
+
+                    // Mock List API with nested logic
+                    testOverrides.listFiles = async (q) => {
+                        // 1. Root level test.png
+                        if (q.includes(`'folder123' in parents`) && q.includes(`name = 'test.png'`)) {
+                            return { result: { files: [{ id: 'file1', name: 'test.png' }] } };
+                        }
+
+                        // 2. assets folder search
+                        if (q.includes(`'folder123' in parents`) && q.includes(`name = 'assets'`)) {
+                            return { result: { files: [{ id: 'folder-assets', name: 'assets', mimeType: 'application/vnd.google-apps.folder' }] } };
+                        }
+
+                        // 3. icon.png in assets folder
+                        if (q.includes(`'folder-assets' in parents`) && q.includes(`name = 'icon.png'`)) {
+                            return { result: { files: [{ id: 'file-icon', name: 'icon.png' }] } };
+                        }
+
+                        return { result: { files: [] } };
+                    };
+
+                    // Mock Fetch
+                    testOverrides.fetchBlob = async (url) => {
+                        if (url.includes('files/file1') || url.includes('files/file-icon')) {
+                            return new Blob(['fake-image']);
+                        }
+                        throw new Error("404");
+                    };
+
+                    // Stub createObjectURL
+                    const originalCreateObjectUrl = URL.createObjectURL;
+                    URL.createObjectURL = (blob) => "blob:test-url";
+
+                    try {
+                        const result = await resolveImages(markdown, mockParent);
+
+                        // Check test.png
+                        assert.ok(result.includes("![img1](blob:test-url)"), "img1 (flat) replaced");
+                        // Check assets/icon.png
+                        assert.ok(result.includes("![img2](blob:test-url)"), "img2 (nested) replaced");
+
+                        // Verify Map
+                        assert.equal(imageMap.get("blob:test-url"), "assets/icon.png", "Map stored correct reverse path for nested");
+
+                    } finally {
+                        URL.createObjectURL = originalCreateObjectUrl;
+                        done();
+                    }
+                });
+
+                QUnit.test('restoreImages reverts blobs to original paths', assert => {
+                    imageMap.set("blob:abc", "original.png");
+                    const input = "![test](blob:abc)";
+                    const result = restoreImages(input);
+                    assert.equal(result, "![test](original.png)");
                 });
             });
         }
