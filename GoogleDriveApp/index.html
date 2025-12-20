@@ -1,0 +1,511 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Google Drive File Viewer</title>
+    <!-- QUnit CSS -->
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
+    <style>
+        body { font-family: sans-serif; padding: 20px; }
+        .hidden { display: none; }
+        .error { color: red; }
+        .section { margin-bottom: 20px; padding: 10px; border: 1px solid #ccc; }
+        #qunit, #qunit-fixture { display: none; }
+        body.testing #qunit, body.testing #qunit-fixture { display: block; }
+        ul { list-style-type: none; padding: 0; }
+        li { padding: 5px; border-bottom: 1px solid #eee; }
+        .meta { font-size: 0.8em; color: gray; }
+    </style>
+</head>
+<body>
+
+    <h1>Google Drive Viewer</h1>
+
+    <div id="configSection" class="section">
+        <h3>Configuration</h3>
+        <label>Client ID: <input type="text" id="clientIdInput" placeholder="YOUR_CLIENT_ID"></label><br><br>
+        <label>API Key: <input type="text" id="apiKeyInput" placeholder="YOUR_API_KEY"></label><br><br>
+        <button id="btnSaveConfig">Save Configuration</button>
+        <span id="configStatus"></span>
+    </div>
+
+    <div id="authSection" class="section hidden">
+        <h3>Authentication</h3>
+        <button id="btnAuth">Authorize with Google Drive</button>
+        <span id="authStatus"></span>
+    </div>
+
+    <div id="mainSection" class="section hidden">
+        <h3>Files</h3>
+        
+        <div style="margin-bottom: 15px;">
+            <input type="text" id="searchInput" placeholder="Search files...">
+            <button id="btnSearch">Search</button>
+            <button id="btnRefresh">Refresh Recent</button>
+        </div>
+
+        <div id="fileListContainer">
+            <ul id="fileList"></ul>
+        </div>
+        <p id="listStatus"></p>
+    </div>
+
+    <!-- Test Containers -->
+    <div id="qunit"></div>
+    <div id="qunit-fixture"></div>
+
+    <!-- Libraries -->
+    <script src="https://code.jquery.com/qunit/qunit-2.20.0.js"></script>
+
+    <!-- App Logic -->
+    <script>
+        // --- State & Constants ---
+        const SCOPES = 'https://www.googleapis.com/auth/drive.metadata.readonly';
+        const DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
+        
+        const state = {
+            tokenClient: null,
+            accessToken: null,
+            gapiInited: false,
+            gisInited: false,
+            clientId: localStorage.getItem('gdrive_client_id') || '',
+            apiKey: localStorage.getItem('gdrive_api_key') || ''
+        };
+
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTestMode = urlParams.get('test') === 'true';
+
+        // --- Dependencies (Injectable for testing) ---
+        const deps = {
+            gapi: () => window.gapi,
+            google: () => window.google,
+            localStorage: window.localStorage
+        };
+
+        // --- DOM Elements ---
+        const el = {
+            clientIdInput: document.getElementById('clientIdInput'),
+            apiKeyInput: document.getElementById('apiKeyInput'),
+            btnSaveConfig: document.getElementById('btnSaveConfig'),
+            configStatus: document.getElementById('configStatus'),
+            
+            authSection: document.getElementById('authSection'),
+            btnAuth: document.getElementById('btnAuth'),
+            authStatus: document.getElementById('authStatus'),
+
+            mainSection: document.getElementById('mainSection'),
+            searchInput: document.getElementById('searchInput'),
+            btnSearch: document.getElementById('btnSearch'),
+            btnRefresh: document.getElementById('btnRefresh'),
+            fileList: document.getElementById('fileList'),
+            listStatus: document.getElementById('listStatus'),
+            
+            configSection: document.getElementById('configSection')
+        };
+
+        // --- Initialization ---
+
+        function initApp() {
+            // Fill config inputs
+            el.clientIdInput.value = state.clientId;
+            el.apiKeyInput.value = state.apiKey;
+
+            // Event Listeners
+            el.btnSaveConfig.addEventListener('click', handleSaveConfig);
+            el.btnAuth.addEventListener('click', handleAuthClick);
+            el.btnSearch.addEventListener('click', handleSearch);
+            el.btnRefresh.addEventListener('click', handleRefresh);
+
+            checkConfigReady();
+        }
+
+        function checkConfigReady() {
+            if (state.clientId && state.apiKey) {
+                el.configStatus.textContent = "Config loaded.";
+                el.configStatus.style.color = "green";
+                // If we were real, we would load libraries here. 
+                // But simplified: show auth section if config exists.
+                el.authSection.classList.remove('hidden');
+                
+                if (!isTestMode) {
+                   loadGoogleLibraries();
+                }
+            } else {
+                el.configStatus.textContent = "Please enter Client ID and API Key.";
+                el.configStatus.style.color = "red";
+                el.authSection.classList.add('hidden');
+            }
+        }
+
+        function handleSaveConfig() {
+            const cid = el.clientIdInput.value.trim();
+            const key = el.apiKeyInput.value.trim();
+            
+            if (!cid || !key) {
+                el.configStatus.textContent = "Both fields are required.";
+                return;
+            }
+
+            state.clientId = cid;
+            state.apiKey = key;
+            deps.localStorage.setItem('gdrive_client_id', cid);
+            deps.localStorage.setItem('gdrive_api_key', key);
+            
+            checkConfigReady();
+        }
+
+        // --- Google Library Loading ---
+        
+        function loadGoogleLibraries() {
+            // Load GAPI
+            const scriptGapi = document.createElement('script');
+            scriptGapi.src = "https://apis.google.com/js/api.js";
+            scriptGapi.onload = () => gapiLoaded();
+            scriptGapi.onerror = () => console.error("Failed to load GAPI");
+            document.body.appendChild(scriptGapi);
+
+            // Load GIS
+            const scriptGis = document.createElement('script');
+            scriptGis.src = "https://accounts.google.com/gsi/client";
+            scriptGis.onload = () => gisLoaded();
+            scriptGis.onerror = () => console.error("Failed to load GIS");
+            document.body.appendChild(scriptGis);
+        }
+
+        async function gapiLoaded() {
+            try {
+                await new Promise((resolve, reject) => {
+                    deps.gapi().load('client', {callback: resolve, onerror: reject});
+                });
+                await deps.gapi().client.init({
+                    apiKey: state.apiKey,
+                    discoveryDocs: [DISCOVERY_DOC],
+                });
+                state.gapiInited = true;
+                checkAuthReady();
+            } catch (err) {
+                el.authStatus.textContent = "Error loading GAPI: " + JSON.stringify(err);
+            }
+        }
+
+        function gisLoaded() {
+            try {
+                state.tokenClient = deps.google().accounts.oauth2.initTokenClient({
+                    client_id: state.clientId,
+                    scope: SCOPES,
+                    callback: (resp) => {
+                        if (resp.error !== undefined) {
+                            throw resp;
+                        }
+                        state.accessToken = resp.access_token;
+                        el.authStatus.textContent = "Authenticated.";
+                        el.authSection.classList.add('hidden');
+                        el.mainSection.classList.remove('hidden');
+                        handleRefresh(); // Auto load recent
+                    },
+                });
+                state.gisInited = true;
+                checkAuthReady();
+            } catch (err) {
+                 el.authStatus.textContent = "Error loading GIS: " + err.message;
+            }
+        }
+
+        function checkAuthReady() {
+            if (state.gapiInited && state.gisInited) {
+                el.authStatus.textContent = "Libraries ready. Click to Authorize.";
+                el.btnAuth.disabled = false;
+            } else {
+                el.btnAuth.disabled = true;
+                el.authStatus.textContent = "Loading libraries...";
+            }
+        }
+
+        // --- Actions ---
+
+        function handleAuthClick() {
+             if (state.tokenClient) {
+                 if (deps.gapi().client.getToken() === null) {
+                    state.tokenClient.requestAccessToken({prompt: 'consent'});
+                } else {
+                    state.tokenClient.requestAccessToken({prompt: ''});
+                }
+             } else {
+                 console.error("Token client not initialized");
+             }
+        }
+
+        async function handleRefresh() {
+            el.listStatus.textContent = "Loading recent files...";
+            try {
+                const response = await deps.gapi().client.drive.files.list({
+                    'pageSize': 10,
+                    'fields': 'files(id, name, modifiedTime, mimeType, webViewLink)',
+                    'orderBy': 'modifiedTime desc',
+                    'q': "trashed=false"
+                });
+                renderFiles(response.result.files);
+                el.listStatus.textContent = "Top 10 most recently modified files.";
+            } catch (err) {
+                console.error(err);
+                el.listStatus.textContent = "Error fetching files.";
+            }
+        }
+
+        async function handleSearch() {
+            const query = el.searchInput.value.trim();
+            if (!query) {
+                handleRefresh();
+                return;
+            }
+            
+            el.listStatus.textContent = `Searching for "${query}"...`;
+            try {
+                // Using 'name contains' for simple partial match
+                // Note: 'contains' is case-insensitive prefix match on name
+                const q = `name contains '${query.replace(/'/g, "\\'")}' and trashed=false`;
+                
+                const response = await deps.gapi().client.drive.files.list({
+                    'pageSize': 10,
+                    'fields': 'files(id, name, modifiedTime, mimeType, webViewLink)',
+                    'orderBy': 'modifiedTime desc',
+                    'q': q
+                });
+                renderFiles(response.result.files);
+                if (response.result.files.length === 0) {
+                    el.listStatus.textContent = "No files found.";
+                } else {
+                    el.listStatus.textContent = `Search results for "${query}"`;
+                }
+            } catch (err) {
+                console.error(err);
+                el.listStatus.textContent = "Search Error.";
+            }
+        }
+
+        function renderFiles(files) {
+            el.fileList.innerHTML = '';
+            if (!files || files.length === 0) {
+                el.fileList.innerHTML = '<li>No files found.</li>';
+                return;
+            }
+
+            files.forEach(file => {
+                const li = document.createElement('li');
+                const date = new Date(file.modifiedTime).toLocaleString();
+                const link = file.webViewLink || '#';
+                
+                // Simple security: sanitize text content
+                li.innerHTML = `
+                    <div><a href="${link}" target="_blank" rel="noopener noreferrer">${escapeHtml(file.name)}</a></div>
+                    <div class="meta">${date} - ${file.mimeType}</div>
+                `;
+                el.fileList.appendChild(li);
+            });
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // --- Bootstrap ---
+        if (!isTestMode) {
+           initApp();
+        }
+
+        // --- Testing Section ---
+        if (isTestMode) {
+            document.body.classList.add('testing');
+            
+            // Helper to reset DOM between tests
+            function resetDOM() {
+                el.clientIdInput.value = '';
+                el.apiKeyInput.value = '';
+                el.configStatus.textContent = '';
+                el.authStatus.textContent = '';
+                el.listStatus.textContent = '';
+                el.fileList.innerHTML = '';
+                
+                el.configSection.classList.remove('hidden');
+                el.authSection.classList.add('hidden');
+                el.mainSection.classList.add('hidden');
+                
+                state.clientId = '';
+                state.apiKey = '';
+                state.tokenClient = null;
+                state.accessToken = null;
+                state.gapiInited = false;
+                state.gisInited = false;
+                
+                // Clear compiled local storage for tests to be clean
+                // But we don't want to wipe actual user LS if they ran tests.
+                // So we mock LS.
+            }
+
+            // Mock Dependencies
+            const mockLocalStorage = (() => {
+                let store = {};
+                return {
+                    getItem: (key) => store[key] || null,
+                    setItem: (key, val) => store[key] = val,
+                    clear: () => store = {}
+                };
+            })();
+            deps.localStorage = mockLocalStorage;
+
+            QUnit.module('Configuration', hooks => {
+                hooks.beforeEach(() => {
+                    resetDOM();
+                    initApp();
+                });
+
+                QUnit.test('Shows error if saving empty config', assert => {
+                    el.clientIdInput.value = '';
+                    el.apiKeyInput.value = '';
+                    el.btnSaveConfig.click();
+                    assert.equal(el.configStatus.textContent, 'Both fields are required.');
+                });
+
+                QUnit.test('Saves valid config and shows auth section', assert => {
+                    el.clientIdInput.value = 'abc';
+                    el.apiKeyInput.value = '123';
+                    el.btnSaveConfig.click();
+                    
+                    assert.equal(state.clientId, 'abc');
+                    assert.equal(state.apiKey, '123');
+                    assert.false(el.authSection.classList.contains('hidden'), 'Auth section is visible');
+                    assert.equal(el.configStatus.style.color, 'green');
+                });
+            });
+
+            QUnit.module('Authentication Flow', hooks => {
+                hooks.beforeEach(() => {
+                    resetDOM();
+                    // Setup valid state
+                    state.clientId = 'abc';
+                    state.apiKey = '123';
+                    initApp(); // Loads config state to UI
+                    
+                    // Mock GAPI/GIS loading manually since we are in test mode
+                    state.gapiInited = true;
+                    state.gisInited = true;
+                    checkAuthReady();
+                });
+
+                QUnit.test('Initializes TokenClient correctly', assert => {
+                    // We need to mock google.accounts.oauth2.initTokenClient
+                    const requestAccessTokenSpy = window.requestAccessTokenSpy = [];
+                    
+                    deps.google = () => ({
+                        accounts: {
+                            oauth2: {
+                                initTokenClient: (config) => {
+                                    assert.equal(config.client_id, 'abc');
+                                    assert.equal(config.scope, SCOPES);
+                                    return {
+                                        requestAccessToken: (opts) => {
+                                            requestAccessTokenSpy.push(opts);
+                                            // Simulate success callback
+                                            config.callback({ access_token: 'fake-token' });
+                                        }
+                                    };
+                                }
+                            }
+                        }
+                    });
+                    
+                    // Trigger "load"
+                    gisLoaded();
+                    
+                    assert.ok(state.tokenClient, 'Token client created');
+                    
+                    // Now click auth
+                    // We also need to mock gapi.client.getToken
+                    deps.gapi = () => ({
+                        client: {
+                            getToken: () => null,
+                            drive: { files: { list: () => Promise.resolve({result: {files: []}}) } }
+                        }
+                    });
+
+                    el.btnAuth.click();
+                    
+                    assert.equal(requestAccessTokenSpy.length, 1, 'requestAccessToken called');
+                    assert.equal(state.accessToken, 'fake-token', 'Access token set from callback');
+                    assert.ok(el.authSection.classList.contains('hidden'), 'Auth section hidden after login');
+                    assert.false(el.mainSection.classList.contains('hidden'), 'Main section visible after login');
+                });
+            });
+
+            QUnit.module('Drive Operations', hooks => {
+                let listCalls = [];
+                
+                hooks.beforeEach(() => {
+                    resetDOM();
+                    state.accessToken = 'valid';
+                    // Enter main section
+                    el.mainSection.classList.remove('hidden');
+                    initApp(); // setup listeners
+
+                    // Mock GAPI drive
+                    listCalls = [];
+                    deps.gapi = () => ({
+                        client: {
+                            drive: {
+                                files: {
+                                    list: async (params) => {
+                                        listCalls.push(params);
+                                        return {
+                                            result: {
+                                                files: [
+                                                    { id: '1', name: 'Test File 1', modifiedTime: '2023-01-01T12:00:00Z', mimeType: 'text/plain' },
+                                                    { id: '2', name: 'Test File 2', modifiedTime: '2023-01-02T12:00:00Z', mimeType: 'application/pdf' }
+                                                ]
+                                            }
+                                        };
+                                    }
+                                }
+                            }
+                        }
+                    });
+                });
+
+                QUnit.test('Refresh fetches recent files', async assert => {
+                    await handleRefresh();
+                    
+                    assert.equal(listCalls.length, 1);
+                    assert.equal(listCalls[0].orderBy, 'modifiedTime desc');
+                    assert.equal(listCalls[0].q, 'trashed=false');
+                    
+                    const lis = el.fileList.querySelectorAll('li');
+                    assert.equal(lis.length, 2);
+                    assert.ok(lis[0].textContent.includes('Test File 1'));
+                });
+
+                QUnit.test('Search fetches with query', async assert => {
+                    el.searchInput.value = 'Report';
+                    await handleSearch();
+                    
+                    assert.equal(listCalls.length, 1);
+                    assert.ok(listCalls[0].q.includes("name contains 'Report'"), 'Query contains name filter');
+                    assert.ok(listCalls[0].q.includes("trashed=false"), 'Query excludes trash');
+                    
+                    const status = el.listStatus.textContent;
+                    assert.ok(status.includes('Search results for "Report"'));
+                });
+
+                QUnit.test('Empty search triggers refresh', async assert => {
+                    el.searchInput.value = '   ';
+                    await handleSearch();
+                    
+                    assert.equal(listCalls.length, 1);
+                    assert.equal(listCalls[0].orderBy, 'modifiedTime desc', 'Reverted to recent sort');
+                });
+            });
+        }
+    </script>
+</body>
+</html>
