@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milkdown Drive Editor</title>
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
+
+    <!-- Google Identity & API -->
+    <script src="https://accounts.google.com/gsi/client" async defer></script>
+    <script src="https://apis.google.com/js/api.js" async defer></script>
+
+    <style>
+        :root {
+            --sidebar-width: 300px;
+            --primary: #4285F4;
+            --border: #e0e0e0;
+            --bg: #f8f9fa;
+        }
+
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Sidebar */
+        #sidebar {
+            width: var(--sidebar-width);
+            background: #fff;
+            border-right: 1px solid var(--border);
+            display: flex;
+            flex-direction: column;
+            flex-shrink: 0;
+        }
+
+        #auth-section {
+            padding: 20px;
+            background: var(--bg);
+            border-bottom: 1px solid var(--border);
+            text-align: center;
+        }
+
+        #file-search {
+            padding: 10px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        #file-search input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            border: 1px solid var(--border);
+            border-radius: 4px;
+        }
+
+        #file-list {
+            flex-grow: 1;
+            overflow-y: auto;
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #file-list li {
+            padding: 10px 20px;
+            border-bottom: 1px solid var(--border);
+            cursor: pointer;
+            transition: background 0.2s;
+            font-size: 0.9em;
+        }
+
+        #file-list li:hover {
+            background-color: #f0f0f0;
+        }
+
+        #file-list li.active {
+            background-color: #e8f0fe;
+            color: var(--primary);
+            font-weight: 600;
+        }
+
+        /* Main Editor */
+        #main {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            background: #fff;
+        }
+
+        #toolbar {
+            padding: 10px 20px;
+            border-bottom: 1px solid var(--border);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            background: #fff;
+            height: 40px;
+        }
+
+        #editor-wrapper {
+            flex-grow: 1;
+            overflow-y: auto;
+            position: relative;
+        }
+
+        /* Milkdown Overrides */
+        .milkdown .editor {
+            padding: 40px 60px;
+            max-width: 900px;
+            margin: 0 auto;
+            /* Ensure editor takes full height inside wrapper */
+            min-height: calc(100vh - 100px);
+        }
+
+        /* Components */
+        .btn {
+            background-color: var(--primary);
+            color: white;
+            border: none;
+            padding: 8px 16px;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: 500;
+        }
+
+        .btn:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        .status-badge {
+            font-size: 0.85em;
+            padding: 4px 8px;
+            border-radius: 12px;
+            background: #eee;
+            color: #666;
+        }
+
+        .status-badge.saving {
+            background: #fff3e0;
+            color: #e65100;
+        }
+
+        .status-badge.saved {
+            background: #e8f5e9;
+            color: #2e7d32;
+        }
+
+        .status-badge.error {
+            background: #ffebee;
+            color: #c62828;
+        }
+
+        /* Testing Mode */
+        #qunit,
+        #qunit-fixture {
+            display: none;
+        }
+
+        body.testing {
+            flex-direction: column;
+            overflow: auto;
+        }
+
+        body.testing #sidebar,
+        body.testing #main {
+            height: auto;
+            border: 1px solid red;
+            margin: 10px;
+            width: auto;
+        }
+
+        body.testing #qunit,
+        body.testing #qunit-fixture {
+            display: block;
+            padding: 20px;
+        }
+    </style>
+</head>
+
+<body>
+
+    <div id="sidebar">
+        <div id="auth-section">
+            <h2>Drive Editor</h2>
+            <button id="authorize_button" class="btn" onclick="handleAuthClick()">Authorize Drive</button>
+            <button id="signout_button" class="btn" onclick="handleSignoutClick()"
+                style="display: none; background-color: #dc3545;">Sign Out</button>
+        </div>
+        <div id="file-search">
+            <input type="text" id="search_input" placeholder="Search .md files..." disabled>
+        </div>
+        <ul id="file-list">
+            <!-- Files will appear here -->
+            <li style="padding:20px; color:#999; text-align:center;">Please login to view files</li>
+        </ul>
+    </div>
+
+    <div id="main">
+        <div id="toolbar">
+            <span id="current-filename" style="font-weight:600;">Welcome</span>
+            <span id="save-status" class="status-badge">Ready</span>
+        </div>
+        <div id="editor-wrapper">
+            <div id="app"></div>
+        </div>
+    </div>
+
+    <!-- QUnit -->
+    <div id="qunit"></div>
+    <div id="qunit-fixture"></div>
+    <script src="https://code.jquery.com/qunit/qunit-2.20.0.js"></script>
+
+    <!-- App Logic -->
+    <script type="module">
+        import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from 'https://esm.sh/@milkdown/core@7.3.2';
+        import { commonmark } from 'https://esm.sh/@milkdown/preset-commonmark@7.3.2?deps=@milkdown/core@7.3.2';
+        import { nord } from 'https://esm.sh/@milkdown/theme-nord@7.3.2?deps=@milkdown/core@7.3.2';
+        import { listener, listenerCtx } from 'https://esm.sh/@milkdown/plugin-listener@7.3.2?deps=@milkdown/core@7.3.2';
+
+        /*******************************************************
+         * CONFIGURATION
+         *******************************************************/
+        const CLIENT_ID = '112047506162-5lphksopq4fss8hnh9jpdi8uk8805hoc.apps.googleusercontent.com'; // <--- REPLACE THIS
+        const API_KEY = 'AIzaSyARvE4eIk7GSicDRN44tjw72YrUKVHPUpg';       // <--- REPLACE THIS
+        const DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
+        const SCOPES = 'https://www.googleapis.com/auth/drive';
+
+        // --- App State ---
+        let tokenClient;
+        let gapiInited = false;
+        let gisInited = false;
+        let currentFileId = null;
+        let currentFrontmatter = ""; // Store stripped frontmatter here
+        let editorInstance = null;
+        let debounceTimer = null;
+        let isSaving = false;
+
+        // --- DOM Elements ---
+        const authBtn = document.getElementById('authorize_button');
+        const signoutBtn = document.getElementById('signout_button');
+        const searchInput = document.getElementById('search_input');
+        const fileList = document.getElementById('file-list');
+        const fileNameSpan = document.getElementById('current-filename');
+        const statusSpan = document.getElementById('save-status');
+
+        // --- Test Mode Check ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTestMode = urlParams.get('test') === 'true';
+        const testOverrides = {}; // For mocking in tests
+
+        /*******************************************************
+         * I. GOOGLE DRIVE API
+         *******************************************************/
+
+        // 1. Initialization
+        window.handleAuthClick = () => {
+            if (isTestMode && testOverrides.handleAuthClick) return testOverrides.handleAuthClick();
+            tokenClient.callback = async (resp) => {
+                if (resp.error !== undefined) {
+                    throw (resp);
+                }
+                updateSigninStatus(true);
+                await listRecentFiles();
+            };
+
+            if (gapi.client.getToken() === null) {
+                tokenClient.requestAccessToken({ prompt: 'consent' });
+            } else {
+                tokenClient.requestAccessToken({ prompt: '' });
+            }
+        }
+
+        window.handleSignoutClick = () => {
+            const token = gapi.client.getToken();
+            if (token !== null) {
+                google.accounts.oauth2.revoke(token.access_token);
+                gapi.client.setToken('');
+                updateSigninStatus(false);
+            }
+        }
+
+        async function gapiLoaded() {
+            if (isTestMode) return;
+            gapi.load('client', async () => {
+                await gapi.client.init({
+                    apiKey: API_KEY,
+                    discoveryDocs: [DISCOVERY_DOC],
+                });
+                gapiInited = true;
+                maybeEnableButtons();
+            });
+        }
+
+        async function gisLoaded() {
+            if (isTestMode) return;
+            tokenClient = google.accounts.oauth2.initTokenClient({
+                client_id: CLIENT_ID,
+                scope: SCOPES,
+                callback: '', // defined later
+            });
+            gisInited = true;
+            maybeEnableButtons();
+        }
+
+        function maybeEnableButtons() {
+            if (gapiInited && gisInited) {
+                authBtn.style.display = 'inline-block';
+            }
+        }
+
+        // Expose to global scope for script onload callbacks
+        window.gapiLoaded = gapiLoaded;
+        window.gisLoaded = gisLoaded;
+
+        // If scripts loaded before this runs (unlikely but possible)
+        if (typeof gapi !== 'undefined') gapiLoaded();
+        if (typeof google !== 'undefined') gisLoaded();
+
+        function updateSigninStatus(isSignedIn) {
+            if (isSignedIn) {
+                authBtn.style.display = 'none';
+                signoutBtn.style.display = 'inline-block';
+                searchInput.disabled = false;
+                fileList.innerHTML = '<li style="padding:20px; color:#999; text-align:center;">Loading files...</li>';
+            } else {
+                authBtn.style.display = 'inline-block';
+                signoutBtn.style.display = 'none';
+                searchInput.disabled = true;
+                fileList.innerHTML = '<li style="padding:20px; color:#999; text-align:center;">Please login to view files</li>';
+                destroyEditor();
+            }
+        }
+
+        // 2. Drive Operations
+        async function listRecentFiles(queryTerm = "") {
+            try {
+                let q = "name contains '.md' and trashed = false";
+                if (queryTerm) {
+                    q += ` and name contains '${queryTerm}'`;
+                }
+
+                // Mockable response
+                const response = (isTestMode && testOverrides.listFiles)
+                    ? await testOverrides.listFiles(q)
+                    : await gapi.client.drive.files.list({
+                        'pageSize': 20,
+                        'fields': 'files(id, name, modifiedTime)',
+                        'orderBy': 'modifiedTime desc',
+                        'q': q
+                    });
+
+                const files = response.result.files;
+                renderFileList(files);
+            } catch (err) {
+                console.error('Error listing files', err);
+                fileList.innerHTML = `<li style="color:red; padding:10px;">Error loading files: ${err.message}</li>`;
+            }
+        }
+
+        async function loadDriveFile(fileId, fileName) {
+            setStatus('loading', 'Loading...');
+            try {
+                const response = (isTestMode && testOverrides.getFile)
+                    ? await testOverrides.getFile(fileId)
+                    : await gapi.client.drive.files.get({
+                        fileId: fileId,
+                        alt: 'media'
+                    });
+
+                const fullText = response.body;
+
+                // Initialize Editor (Destroy first to clear old state, but we must re-set state after)
+                await destroyEditor();
+
+                // --- FRONTMATTER HANDLING ---
+                const { frontmatter, body } = parseFrontmatter(fullText);
+                currentFrontmatter = frontmatter;
+                currentFileId = fileId;
+
+                // UI Updates
+                fileNameSpan.textContent = fileName;
+                setStatus('ready', 'Ready');
+
+                await createEditor(body);
+
+                // Highlight active in list
+                document.querySelectorAll('#file-list li').forEach(li => li.classList.remove('active'));
+                const activeLi = document.getElementById(`file-${fileId}`);
+                if (activeLi) activeLi.classList.add('active');
+
+            } catch (err) {
+                console.error(err);
+                setStatus('error', 'Load Failed');
+            }
+        }
+
+        async function saveDriveFile(content) {
+            if (!currentFileId) return;
+
+            isSaving = true;
+            setStatus('saving', 'Saving...');
+
+            try {
+                // Re-attach frontmatter
+                const finalContent = currentFrontmatter + content;
+
+                if (isTestMode && testOverrides.updateFile) {
+                    await testOverrides.updateFile(currentFileId, finalContent);
+                } else {
+                    await gapi.client.request({
+                        path: `/upload/drive/v3/files/${currentFileId}`,
+                        method: 'PATCH',
+                        params: { uploadType: 'media' },
+                        body: finalContent
+                    });
+                }
+
+                setStatus('saved', 'Saved to Drive');
+            } catch (err) {
+                console.error(err);
+                setStatus('error', 'Save Failed');
+            } finally {
+                isSaving = false;
+            }
+        }
+
+        /*******************************************************
+         * II. LOGIC & HELPERS
+         *******************************************************/
+
+        function renderFileList(files) {
+            fileList.innerHTML = '';
+            if (!files || files.length === 0) {
+                fileList.innerHTML = '<li style="padding:20px; color:#999; text-align:center;">No Markdown files found.</li>';
+                return;
+            }
+
+            files.forEach(file => {
+                const li = document.createElement('li');
+                li.id = `file-${file.id}`;
+                li.textContent = file.name;
+                li.onclick = () => loadDriveFile(file.id, file.name);
+                fileList.appendChild(li);
+            });
+        }
+
+        // Basic Frontmatter Parser (YAML-like)
+        // Looks for --- at start, then next ---
+        function parseFrontmatter(text) {
+            // Normalize newlines
+            const normalized = text.replace(/\r\n/g, '\n');
+            const match = normalized.match(/^---\n([\s\S]*?)\n---\n/);
+
+            if (match) {
+                return {
+                    frontmatter: match[0], // Keep the whole block including delimiters
+                    body: normalized.substring(match[0].length)
+                };
+            }
+            return { frontmatter: "", body: normalized };
+        }
+
+        function setStatus(cls, text) {
+            statusSpan.className = `status-badge ${cls}`;
+            statusSpan.textContent = text;
+        }
+
+        // Debounce
+        function debounce(func, wait) {
+            return function (...args) {
+                clearTimeout(debounceTimer);
+                setStatus('saving', 'Unsaved changes...');
+                debounceTimer = setTimeout(() => func.apply(this, args), wait);
+            };
+        }
+
+        const debouncedSave = debounce((content) => {
+            saveDriveFile(content);
+        }, 2000); // 2 second delay
+
+        // Search Listener
+        let searchTimeout;
+        searchInput.addEventListener('input', (e) => {
+            clearTimeout(searchTimeout);
+            searchTimeout = setTimeout(() => {
+                fileList.innerHTML = '<li style="padding:20px; color:#999; text-align:center;">Searching...</li>';
+                listRecentFiles(e.target.value);
+            }, 500);
+        });
+
+        /*******************************************************
+         * III. MILKDOWN EDITOR
+         *******************************************************/
+
+        async function createEditor(content) {
+            if (isTestMode && testOverrides.createEditor) return testOverrides.createEditor(content);
+
+            editorInstance = await Editor.make()
+                .config((ctx) => {
+                    ctx.set(rootCtx, document.querySelector('#app'));
+                    ctx.set(defaultValueCtx, content);
+                    ctx.set(editorViewOptionsCtx, { editable: () => true });
+
+                    // Listener for autosave
+                    ctx.get(listenerCtx).markdownUpdated((ctx, markdown) => {
+                        // Only save if we have a file loaded
+                        if (currentFileId) {
+                            debouncedSave(markdown);
+                        }
+                    });
+                })
+                .use(nord)
+                .use(commonmark)
+                .use(listener)
+                .create();
+        }
+
+        async function destroyEditor() {
+            if (editorInstance) {
+                document.querySelector('#app').innerHTML = '';
+                editorInstance = null;
+            }
+            fileNameSpan.textContent = "";
+            currentFileId = null;
+            currentFrontmatter = "";
+            setStatus('ready', '');
+        }
+
+        /*******************************************************
+         * IV. TESTING (QUNIT)
+         *******************************************************/
+        if (isTestMode && window.QUnit) {
+            document.body.classList.add('testing');
+
+            QUnit.module('Frontmatter Logic', () => {
+                QUnit.test('parseFrontmatter separates YAML from body', assert => {
+                    const original = "---\ntitle: test\n---\n# Header\nContent";
+                    const { frontmatter, body } = parseFrontmatter(original);
+                    assert.equal(frontmatter.trim(), "---\ntitle: test\n---", "Frontmatter captured");
+                    assert.equal(body.trim(), "# Header\nContent", "Body captured");
+                });
+
+                QUnit.test('parseFrontmatter handles no frontmatter', assert => {
+                    const original = "# Just Content";
+                    const { frontmatter, body } = parseFrontmatter(original);
+                    assert.equal(frontmatter, "", "Empty frontmatter");
+                    assert.equal(body, original, "Body matches original");
+                });
+            });
+
+            QUnit.module('UI & List', hooks => {
+                hooks.beforeEach(() => {
+                    fileList.innerHTML = '';
+                });
+
+                QUnit.test('renderFileList creates list items', assert => {
+                    const files = [
+                        { id: '1', name: 'File1.md' },
+                        { id: '2', name: 'File2.md' }
+                    ];
+                    renderFileList(files);
+                    assert.equal(fileList.children.length, 2);
+                    assert.equal(fileList.children[0].textContent, 'File1.md');
+                });
+
+                QUnit.test('renderFileList handles empty list', assert => {
+                    renderFileList([]);
+                    assert.ok(fileList.textContent.includes('No Markdown files'));
+                });
+            });
+
+            QUnit.module('Drive Interaction', hooks => {
+                let savedListFiles, savedGetFile, savedUpdateFile;
+
+                hooks.beforeEach(() => {
+                    savedListFiles = testOverrides.listFiles;
+                    savedGetFile = testOverrides.getFile;
+                    savedUpdateFile = testOverrides.updateFile;
+                });
+
+                hooks.afterEach(() => {
+                    testOverrides.listFiles = savedListFiles;
+                    testOverrides.getFile = savedGetFile;
+                    testOverrides.updateFile = savedUpdateFile;
+                    currentFileId = null;
+                    if (debounceTimer) clearTimeout(debounceTimer);
+                });
+
+                QUnit.test('listRecentFiles calls API with correct query', async assert => {
+                    const done = assert.async();
+                    testOverrides.listFiles = async (q) => {
+                        assert.ok(q.includes("name contains '.md'"), "Query filters for markdown");
+                        assert.ok(q.includes("trashed = false"), "Query excludes trash");
+                        done();
+                        return { result: { files: [] } };
+                    };
+                    await listRecentFiles();
+                });
+
+                QUnit.test('loadDriveFile parses frontmatter and sets editor', async assert => {
+                    const done = assert.async();
+                    const mockId = '123';
+                    const mockContent = "---\nmeta: true\n---\n# Body";
+
+                    testOverrides.getFile = async (id) => {
+                        assert.equal(id, mockId);
+                        return { body: mockContent };
+                    };
+
+                    testOverrides.createEditor = async (content) => {
+                        assert.equal(content, "# Body", "Editor received only body");
+                        assert.equal(currentFrontmatter, "---\nmeta: true\n---\n", "Frontmatter stored globally");
+                        done();
+                    };
+
+                    await loadDriveFile(mockId, 'Test.md');
+                });
+
+                QUnit.test('saveDriveFile re-attaches frontmatter', async assert => {
+                    const done = assert.async();
+
+                    // Setup internal state
+                    currentFileId = '123';
+                    currentFrontmatter = "---Header---\n";
+                    const newContent = "New Body";
+
+                    testOverrides.updateFile = async (id, content) => {
+                        assert.equal(id, '123');
+                        assert.equal(content, "---Header---\nNew Body", "Frontmatter prepended to update");
+                        // check UI
+                        assert.ok(statusSpan.className.includes('saving'), 'Status is saving during op');
+                        done();
+                    };
+
+                    await saveDriveFile(newContent);
+                    assert.ok(statusSpan.className.includes('saved'), 'Status becomes saved');
+                });
+            });
+        }
+    </script>
+</body>
+
+</html>

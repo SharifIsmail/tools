@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Debug Milkdown</title>
+</head>
+
+<body>
+    <div id="app"></div>
+    <script type="module">
+        import * as Core from 'https://esm.sh/@milkdown/core@7.3.2';
+        console.log('Milkdown Core Exports:', Object.keys(Core));
+
+        if (Core.editorViewOptionsCtx) {
+            console.log('editorViewOptionsCtx Found!');
+        } else {
+            console.error('editorViewOptionsCtx NOT FOUND in Core!');
+        }
+    </script>
+</body>
+
+</html>

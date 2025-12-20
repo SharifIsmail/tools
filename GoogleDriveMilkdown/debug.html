@@ -1,0 +1,82 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milkdown Debug</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            height: 100vh;
+            flex-direction: column;
+        }
+
+        #main {
+            flex-grow: 1;
+            display: flex;
+            flex-direction: column;
+        }
+
+        #editor-wrapper {
+            flex-grow: 1;
+            overflow-y: auto;
+            background: #f0f0f0;
+        }
+
+        .milkdown .editor {
+            padding: 20px;
+            background: white;
+            min-height: 500px;
+            max-width: 800px;
+            margin: 20px auto;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Milkdown Debug</h1>
+
+    <div id="main">
+        <div id="editor-wrapper">
+            <div id="app"></div>
+        </div>
+    </div>
+
+    <script type="module">
+        import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from 'https://esm.sh/@milkdown/core@7.3.2';
+        import { commonmark } from 'https://esm.sh/@milkdown/preset-commonmark@7.3.2?deps=@milkdown/core@7.3.2';
+        import { gfm } from 'https://esm.sh/@milkdown/preset-gfm@7.3.2?deps=@milkdown/core@7.3.2';
+        import { nord } from 'https://esm.sh/@milkdown/theme-nord@7.3.2?deps=@milkdown/core@7.3.2';
+        import { listener, listenerCtx } from 'https://esm.sh/@milkdown/plugin-listener@7.3.2?deps=@milkdown/core@7.3.2';
+
+        async function main() {
+            try {
+                console.log("Starting Core Editor with deps fixed...");
+                const editor = await Editor.make()
+                    .config((ctx) => {
+                        ctx.set(rootCtx, document.querySelector('#app'));
+                        ctx.set(defaultValueCtx, '# Hello World\n\nThis is Core Debug with deps fixed.');
+                        ctx.set(editorViewOptionsCtx, { editable: () => true });
+                        ctx.get(listenerCtx).markdownUpdated((ctx, markdown) => {
+                            console.log("Updated:", markdown.length);
+                        });
+                    })
+                    .use(nord)
+                    .use(commonmark)
+                    .use(gfm)
+                    .use(listener)
+                    .create();
+
+                console.log("Editor created:", editor);
+            } catch (err) {
+                console.error("Editor Failed:", err);
+                document.body.innerHTML += `<div style="color:red; font-weight:bold; padding:20px;">Error: ${err.message}</div>`;
+            }
+        }
+        main();
+    </script>
+</body>
+
+</html>

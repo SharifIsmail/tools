@@ -1,0 +1,474 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Milkdown Editor</title>
+    <link rel="stylesheet" href="https://code.jquery.com/qunit/qunit-2.20.0.css">
+    <style>
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            margin: 0;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            height: 100vh;
+            box-sizing: border-box;
+            background-color: #f4f4f9;
+        }
+
+        h1 {
+            margin-top: 0;
+            font-size: 1.5rem;
+            color: #333;
+        }
+
+        #controls {
+            margin-bottom: 15px;
+            display: flex;
+            align-items: center;
+            gap: 15px;
+            padding: 10px;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 5px rgba(0, 0, 0, 0.05);
+        }
+
+        button {
+            padding: 8px 16px;
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            background-color: #007bff;
+            color: white;
+            font-weight: 500;
+            transition: background 0.2s;
+        }
+
+        button:hover {
+            background-color: #0056b3;
+        }
+
+        button:disabled {
+            background-color: #ccc;
+            cursor: not-allowed;
+        }
+
+        #status {
+            font-size: 0.9rem;
+            font-weight: 500;
+        }
+
+        #editor-container {
+            flex-grow: 1;
+            background: white;
+            border-radius: 8px;
+            box-shadow: 0 2px 10px rgba(0, 0, 0, 0.05);
+            overflow: hidden;
+            position: relative;
+        }
+
+        /* Milkdown Override */
+        .milkdown .editor {
+            padding: 40px;
+            max-width: 800px;
+            margin: 0 auto;
+            min-height: 100%;
+            outline: none;
+        }
+
+        /* Test Mode */
+        #qunit,
+        #qunit-fixture {
+            display: none;
+        }
+
+        body.testing #qunit,
+        body.testing #qunit-fixture {
+            display: block;
+            margin-top: 20px;
+        }
+
+        body.testing #editor-container {
+            height: 100px;
+            flex-grow: 0;
+            overflow: hidden;
+            opacity: 0.5;
+        }
+    </style>
+</head>
+
+<body>
+
+    <h1>Milkdown Local Editor</h1>
+
+    <div id="controls">
+        <button id="btnOpen">Open Markdown File</button>
+        <span id="status" style="color: gray;">No file loaded</span>
+    </div>
+
+    <div id="editor-container">
+        <div id="app"></div>
+    </div>
+
+    <!-- QUnit Containers -->
+    <div id="qunit"></div>
+    <div id="qunit-fixture"></div>
+
+    <script src="https://code.jquery.com/qunit/qunit-2.20.0.js"></script>
+    <script type="module">
+        import { Editor, rootCtx, defaultValueCtx, editorViewOptionsCtx } from 'https://esm.sh/@milkdown/core@7.3.2';
+        import { commonmark } from 'https://esm.sh/@milkdown/preset-commonmark@7.3.2?deps=@milkdown/core@7.3.2';
+        import { nord } from 'https://esm.sh/@milkdown/theme-nord@7.3.2?deps=@milkdown/core@7.3.2';
+        import { listener, listenerCtx } from 'https://esm.sh/@milkdown/plugin-listener@7.3.2?deps=@milkdown/core@7.3.2';
+
+        // --- App State ---
+        let editorInstance = null;
+        let fileHandle = null;
+        let isSaving = false;
+        let debounceTimer = null;
+
+        // --- Test Overrides ---
+        const urlParams = new URLSearchParams(window.location.search);
+        const isTestMode = urlParams.get('test') === 'true';
+        const testOverrides = Object.create(null);
+
+        // --- DOM Elements ---
+        const btnOpen = document.getElementById('btnOpen');
+        const statusSpan = document.getElementById('status');
+
+        // --- Core Logic ---
+
+        // 1. Editor Initialization
+        async function initEditor() {
+            if (isTestMode && testOverrides.initEditor) {
+                return testOverrides.initEditor();
+            }
+
+            try {
+                editorInstance = await Editor.make()
+                    .config((ctx) => {
+                        ctx.set(rootCtx, document.querySelector('#app'));
+                        ctx.set(defaultValueCtx, '# Welcome to Milkdown\n\nClick "Open Markdown File" to start.');
+                        ctx.set(editorViewOptionsCtx, { editable: () => true });
+
+                        // Setup listener for auto-save
+                        ctx.get(listenerCtx).markdownUpdated((ctx, markdown, prevMarkdown) => {
+                            if (fileHandle) {
+                                debounceSave(markdown);
+                            }
+                        });
+                    })
+                    .use(nord)
+                    .use(commonmark)
+                    .use(listener)
+                    .create();
+            } catch (e) {
+                console.error("Editor Init Error:", e);
+                statusSpan.textContent = "Editor Init Error: " + e.message;
+            }
+        }
+
+        // 2. File Operations
+        async function openFile() {
+            try {
+                const picker = isTestMode && testOverrides.showOpenFilePicker
+                    ? testOverrides.showOpenFilePicker
+                    : window.showOpenFilePicker;
+
+                const [handle] = await picker({
+                    types: [{
+                        description: 'Markdown Files',
+                        accept: { 'text/markdown': ['.md', '.markdown'] },
+                    }],
+                    multiple: false,
+                });
+
+                fileHandle = handle;
+                statusSpan.textContent = `Loading ${handle.name}...`;
+                statusSpan.style.color = 'blue';
+
+                const file = await fileHandle.getFile();
+                const text = await file.text();
+
+                await destroyEditor();
+                await createEditorWithContent(text);
+
+                statusSpan.textContent = `Editing: ${handle.name}`;
+                statusSpan.style.color = 'black';
+
+            } catch (err) {
+                if (err.name !== 'AbortError') {
+                    console.error(err);
+                    statusSpan.textContent = 'Error opening file';
+                    statusSpan.style.color = 'red';
+                }
+            }
+        }
+
+        async function saveFile(content) {
+            // Test hook to allow intercepting save content
+            if (isTestMode && testOverrides.saveFile) {
+                await testOverrides.saveFile(content);
+            }
+
+            if (!fileHandle) return;
+            isSaving = true;
+            statusSpan.textContent = 'Saving...';
+            statusSpan.style.color = 'orange';
+
+            try {
+                const writer = isTestMode && testOverrides.createWritable
+                    ? await testOverrides.createWritable(fileHandle)
+                    : await fileHandle.createWritable();
+
+                await writer.write(content);
+                await writer.close();
+
+                statusSpan.textContent = 'Saved';
+                statusSpan.style.color = 'green';
+            } catch (err) {
+                console.error(err);
+                statusSpan.textContent = 'Save Failed';
+                statusSpan.style.color = 'red';
+            } finally {
+                isSaving = false;
+            }
+        }
+
+        // 3. Debounce Logic
+        function debounceSave(content) {
+            if (debounceTimer) {
+                clearTimeout(debounceTimer);
+            }
+
+            statusSpan.textContent = 'Unsaved changes...';
+            statusSpan.style.color = 'orange';
+
+            const delay = isTestMode && testOverrides.debounceDelay !== undefined
+                ? testOverrides.debounceDelay
+                : 1000;
+
+            debounceTimer = setTimeout(() => {
+                saveFile(content);
+            }, delay);
+        }
+
+        // --- Helpers ---
+        async function destroyEditor() {
+            if (isTestMode && testOverrides.destroyEditor) {
+                return testOverrides.destroyEditor();
+            }
+            if (editorInstance) {
+                document.querySelector('#app').innerHTML = '';
+                editorInstance = null;
+            }
+        }
+
+        async function createEditorWithContent(content) {
+            if (isTestMode && testOverrides.createEditorWithContent) {
+                return testOverrides.createEditorWithContent(content);
+            }
+
+            editorInstance = await Editor.make()
+                .config((ctx) => {
+                    ctx.set(rootCtx, document.querySelector('#app'));
+                    ctx.set(defaultValueCtx, content);
+                    ctx.set(editorViewOptionsCtx, { editable: () => true });
+                    ctx.get(listenerCtx).markdownUpdated((ctx, markdown) => {
+                        if (fileHandle) debounceSave(markdown);
+                    });
+                })
+                .use(nord)
+                .use(commonmark)
+                .use(listener)
+                .create();
+        }
+
+        // --- Event Listeners ---
+        btnOpen.addEventListener('click', openFile);
+
+        // Init normal editor if not testing
+        if (!isTestMode) {
+            initEditor();
+        }
+
+        // --- Testing Strategy (QUnit) ---
+        if (window.QUnit) {
+            if (isTestMode) {
+                document.body.classList.add('testing');
+
+                QUnit.module('UI & Logic', hooks => {
+                    let originalFileHandle;
+                    let savedOverrides = {};
+
+                    hooks.beforeEach(() => {
+                        originalFileHandle = fileHandle;
+                        fileHandle = null;
+                        statusSpan.textContent = 'Waiting...';
+                        savedOverrides = { ...testOverrides };
+
+                        // Default harmless mocks
+                        testOverrides.initEditor = async () => { };
+                        testOverrides.destroyEditor = async () => { };
+                        testOverrides.createEditorWithContent = async () => { };
+
+                        // Prevent actual file dialogs
+                        testOverrides.showOpenFilePicker = async () => { throw new Error("Not mocked"); };
+                    });
+
+                    hooks.afterEach(() => {
+                        fileHandle = originalFileHandle;
+                        // restore overrides not easy since it's an object, so we just clear it
+                        for (const key in testOverrides) delete testOverrides[key];
+                        // clear timer
+                        if (debounceTimer) {
+                            clearTimeout(debounceTimer);
+                            debounceTimer = null;
+                        }
+                    });
+
+                    QUnit.test('openFile updates status and loads content', async assert => {
+                        const done = assert.async();
+
+                        const mockHandle = {
+                            name: 'demo.md',
+                            getFile: async () => ({
+                                text: async () => '# Hello'
+                            })
+                        };
+
+                        testOverrides.showOpenFilePicker = async () => [mockHandle];
+                        testOverrides.createEditorWithContent = async (content) => {
+                            assert.equal(content, '# Hello', 'Editor created with file content');
+                        };
+
+                        await openFile();
+
+                        assert.equal(statusSpan.textContent, 'Editing: demo.md', 'Status updated to filename');
+                        assert.equal(fileHandle, mockHandle, 'File handle stored globally');
+                        done();
+                    });
+
+                    QUnit.test('openFile handles errors gracefully', async assert => {
+                        testOverrides.showOpenFilePicker = async () => { throw new Error('Permission denied'); };
+
+                        await openFile();
+
+                        assert.equal(statusSpan.textContent, 'Error opening file', 'Status indicates error');
+                        assert.equal(statusSpan.style.color, 'red', 'Status text is red');
+                    });
+                });
+
+                QUnit.module('Persistence', hooks => {
+                    hooks.beforeEach(() => {
+                        // clear overrides
+                        for (const key in testOverrides) delete testOverrides[key];
+                        if (debounceTimer) clearTimeout(debounceTimer);
+                    });
+
+                    QUnit.test('saveFile writes content to writable stream', async assert => {
+                        const writtenContent = [];
+                        fileHandle = {
+                            name: 'test.md',
+                            createWritable: async () => ({
+                                write: async (chunk) => writtenContent.push(chunk),
+                                close: async () => { }
+                            })
+                        };
+
+                        await saveFile('my content');
+
+                        assert.deepEqual(writtenContent, ['my content'], 'Content written to stream');
+                        assert.equal(statusSpan.textContent, 'Saved', 'Status reflects success');
+                    });
+
+                    QUnit.test('debounceSave waits before saving', async assert => {
+                        const done = assert.async();
+                        let saveCalled = false;
+
+                        testOverrides.debounceDelay = 50;
+                        testOverrides.saveFile = async (content) => {
+                            saveCalled = true;
+                            assert.equal(content, 'delayed content');
+                            done(); // Finish test
+                        };
+
+                        // Mock handle so check passes
+                        fileHandle = {};
+
+                        debounceSave('delayed content');
+                        assert.false(saveCalled, 'Save not called immediately');
+                        assert.ok(statusSpan.textContent.includes('Unsaved'), 'Status shows unsaved');
+                    });
+
+                    QUnit.test('debounceSave resets timer on rapid changes', async assert => {
+                        const done = assert.async();
+                        let saveCount = 0;
+
+                        testOverrides.debounceDelay = 50;
+                        testOverrides.saveFile = async () => {
+                            saveCount++;
+                        };
+                        fileHandle = {};
+
+                        debounceSave('1');
+                        debounceSave('2');
+                        debounceSave('3');
+
+                        // Wait longer than delay
+                        setTimeout(() => {
+                            assert.equal(saveCount, 1, 'Save called only once');
+                            done();
+                        }, 100);
+                    });
+                });
+
+                // --- E2E / Integration Tests ---
+                // These run specific flow WITHOUT mocking the editor to catch potential config errors.
+                QUnit.module('Integration (E2E Initialization)', hooks => {
+                    hooks.beforeEach(async () => {
+                        // Clear overrides to allow real editor init
+                        for (const key in testOverrides) delete testOverrides[key];
+                        // But we still need to block usage of 'window.showOpenFilePicker' if triggered
+                        testOverrides.showOpenFilePicker = async () => { throw new Error("Using Real Editor, but blocking UI picker"); };
+
+                        // Clear DOM
+                        document.querySelector('#app').innerHTML = '';
+                    });
+
+                    hooks.afterEach(async () => {
+                        // Clean up
+                        await destroyEditor();
+                    });
+
+                    QUnit.test('Real createEditorWithContent initializes without error', async assert => {
+                        // This test verifies that the Milkdown config is valid and imports are correct
+                        const done = assert.async();
+
+                        try {
+                            await createEditorWithContent('# Integration Test');
+
+                            // Wait a bit for async Milkdown creation to finish if needed
+                            // createEditorWithContent awaits create(), so it should be ready.
+
+                            const editorEl = document.querySelector('.milkdown .editor');
+                            assert.ok(editorEl, 'Milkdown editor DOM element successfully created');
+                            assert.ok(editorEl.textContent.trim().includes('Integration Test'), 'Editor content rendered');
+                            done();
+                        } catch (e) {
+                            assert.ok(false, 'Initialization threw error: ' + e.message);
+                            done();
+                        }
+                    });
+                });
+
+            } else {
+                QUnit.config.autostart = false;
+            }
+        }
+    </script>
+</body>
+
+</html>
