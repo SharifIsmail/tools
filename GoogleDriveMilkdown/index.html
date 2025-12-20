@@ -392,6 +392,68 @@
             setupSection.style.display = 'flex';
         }
 
+        // --- Prefetching / Caching ---
+        // Map<fileId, Promise<{body: string, frontmatter: string, imageMap: Map}>>
+        const fileCache = new Map();
+
+        async function prefetchFiles(files) {
+            // Safety check for tests: if mocks aren't ready, don't prefetch
+            if (isTestMode && (!testOverrides.getFileMeta || !testOverrides.getFile)) {
+                return;
+            }
+
+            // Take top 20 files
+            const toPrefetch = files.slice(0, 20);
+
+            toPrefetch.forEach(file => {
+                if (fileCache.has(file.id)) return; // Already cached or fetching
+
+                console.log(`[Prefetch] Starting ${file.name}`);
+
+                // Store promise immediately to prevent duplicate fetches
+                const fetchPromise = (async () => {
+                    try {
+                        // Parallel fetch: Metadata (for parents) + Content
+                        const [metaResp, contentResp] = await Promise.all([
+                            (isTestMode && testOverrides.getFileMeta)
+                                ? testOverrides.getFileMeta(file.id)
+                                : gapi.client.drive.files.get({ fileId: file.id, fields: 'parents, name' }),
+                            (isTestMode && testOverrides.getFile)
+                                ? testOverrides.getFile(file.id)
+                                : gapi.client.drive.files.get({ fileId: file.id, alt: 'media' })
+                        ]);
+
+                        const meta = isTestMode ? metaResp : metaResp.result;
+                        const fullText = isTestMode ? contentResp.body : contentResp.body;
+
+                        const { frontmatter, body } = parseFrontmatter(fullText);
+
+                        // Resolve Images
+                        let parentId = (meta.parents && meta.parents.length > 0) ? meta.parents[0] : null;
+                        let displayBody = body;
+
+                        // Use a local map for this file
+                        const fileImageMap = new Map();
+                        if (parentId) {
+                            displayBody = await resolveImages(body, parentId, fileImageMap);
+                        }
+
+                        return {
+                            body: displayBody,
+                            frontmatter: frontmatter,
+                            imageMap: fileImageMap
+                        };
+                    } catch (err) {
+                        console.warn(`[Prefetch] Failed ${file.name}`, err);
+                        fileCache.delete(file.id); // Remove failed promise so we can retry later
+                        throw err;
+                    }
+                })();
+
+                fileCache.set(file.id, fetchPromise);
+            });
+        }
+
         /*******************************************************
          * I. GOOGLE DRIVE API
          *******************************************************/
@@ -514,43 +576,65 @@
         async function loadDriveFile(fileId, fileName) {
             setStatus('loading', 'Loading...');
             try {
-                // Parallel fetch: Metadata (for parents) + Content
-                // We mock these efficiently in tests
-                const [metaResp, contentResp] = await Promise.all([
-                    (isTestMode && testOverrides.getFileMeta)
-                        ? testOverrides.getFileMeta(fileId)
-                        : gapi.client.drive.files.get({ fileId: fileId, fields: 'parents, name' }),
-                    (isTestMode && testOverrides.getFile)
-                        ? testOverrides.getFile(fileId)
-                        : gapi.client.drive.files.get({ fileId: fileId, alt: 'media' })
-                ]);
-
-                const meta = isTestMode ? metaResp : metaResp.result;
-                const fullText = isTestMode ? contentResp.body : contentResp.body;
-
                 // Initialize Editor (Destroy first)
                 await destroyEditor();
 
-                // --- FRONTMATTER HANDLING ---
-                const { frontmatter, body } = parseFrontmatter(fullText);
-                currentFrontmatter = frontmatter;
-                currentFileId = fileId;
+                // Initialize clean global image map for this session
+                imageMap = new Map();
 
-                // --- IMAGE HANDLING ---
-                // We need the parent folder to look for sibling images
-                let parentId = (meta.parents && meta.parents.length > 0) ? meta.parents[0] : null;
+                let loadedData;
 
-                let displayBody = body;
-                if (parentId) {
-                    setStatus('loading', 'Loading images...');
-                    displayBody = await resolveImages(body, parentId);
+                // --- CACHE CHECK ---
+                if (fileCache.has(fileId)) {
+                    console.log(`[Cache] Hit for ${fileName}`);
+                    loadedData = await fileCache.get(fileId);
+                } else {
+                    console.log(`[Cache] Miss for ${fileName}, fetching...`);
+                    // Parallel fetch: Metadata (for parents) + Content
+                    const [metaResp, contentResp] = await Promise.all([
+                        (isTestMode && testOverrides.getFileMeta)
+                            ? testOverrides.getFileMeta(fileId)
+                            : gapi.client.drive.files.get({ fileId: fileId, fields: 'parents, name' }),
+                        (isTestMode && testOverrides.getFile)
+                            ? testOverrides.getFile(fileId)
+                            : gapi.client.drive.files.get({ fileId: fileId, alt: 'media' })
+                    ]);
+
+                    const meta = isTestMode ? metaResp : metaResp.result;
+                    const fullText = isTestMode ? contentResp.body : contentResp.body;
+
+                    const { frontmatter, body } = parseFrontmatter(fullText);
+
+                    // Resolve Images
+                    let parentId = (meta.parents && meta.parents.length > 0) ? meta.parents[0] : null;
+                    let displayBody = body;
+                    let fileImageMap = new Map();
+
+                    if (parentId) {
+                        setStatus('loading', 'Loading images...');
+                        displayBody = await resolveImages(body, parentId, fileImageMap);
+                    }
+
+                    loadedData = {
+                        body: displayBody,
+                        frontmatter: frontmatter,
+                        imageMap: fileImageMap
+                    };
+
+                    // Cache it now for future?
+                    fileCache.set(fileId, Promise.resolve(loadedData));
                 }
+
+                // Apply Data
+                currentFrontmatter = loadedData.frontmatter;
+                currentFileId = fileId;
+                imageMap = loadedData.imageMap; // Restore the specific map for this file
 
                 // UI Updates
                 fileNameSpan.textContent = fileName;
                 setStatus('ready', 'Ready');
 
-                await createEditor(displayBody);
+                await createEditor(loadedData.body);
 
                 // Highlight active in list
                 document.querySelectorAll('#file-list li').forEach(li => li.classList.remove('active'));
@@ -560,6 +644,7 @@
             } catch (err) {
                 console.error(err);
                 setStatus('error', 'Load Failed: ' + (err.result?.error?.message || err.message));
+                fileCache.delete(fileId); // Validate cache on error
             }
         }
 
@@ -586,6 +671,9 @@
                         body: finalContent
                     });
                 }
+
+                // Invalidate cache since content changed
+                fileCache.delete(currentFileId);
 
                 setStatus('saved', 'Saved to Drive');
             } catch (err) {
@@ -616,6 +704,31 @@
 
             for (let i = 0; i < parts.length; i++) {
                 const name = parts[i];
+                if (!name || name === '.') continue;
+
+                if (name === '..') {
+                    // Fetch parent of currentId
+                    try {
+                        const resp = (isTestMode && testOverrides.getFileMeta)
+                            ? await testOverrides.getFileMeta(currentId)
+                            : await gapi.client.drive.files.get({
+                                fileId: currentId,
+                                fields: 'parents'
+                            });
+
+                        const meta = isTestMode ? resp : resp.result;
+                        if (!meta.parents || meta.parents.length === 0) {
+                            console.warn(`[MilkdownImage] Cannot traverse up from ${currentId}`);
+                            return null;
+                        }
+                        currentId = meta.parents[0];
+                        continue;
+                    } catch (e) {
+                        console.warn(`[MilkdownImage] Error traversing up from ${currentId}`, e);
+                        return null;
+                    }
+                }
+
                 const isLast = i === parts.length - 1;
                 const safeName = name.replace(/'/g, "\\'");
 
@@ -649,8 +762,10 @@
             return currentId;
         }
 
-        async function resolveImages(markdown, parentId) {
-            imageMap.clear();
+        async function resolveImages(markdown, parentId, targetMap = null) {
+            const mapToUse = targetMap || imageMap;
+            if (!targetMap) imageMap.clear();
+
             const regex = /!\[([^\]]*)\]\(([^)]+)\)/g;
             let match;
             const updates = [];
@@ -693,7 +808,7 @@
 
                         const blobUrl = URL.createObjectURL(blob);
                         urlMap[src] = blobUrl;
-                        imageMap.set(blobUrl, src);
+                        mapToUse.set(blobUrl, src);
                     } else {
                         console.warn(`[MilkdownImage] Image not found in Drive: ${src}`);
                     }
@@ -706,14 +821,6 @@
             let newMarkdown = markdown;
             updates.forEach(({ fullMatch, alt, src }) => {
                 if (urlMap[src]) {
-                    // Use replace with string to avoid regex special char issues in src
-                    // But we must match the exact instance.
-                    // To be safe, we rebuild the string or use global replace carefully.
-                    // Since we iterate findings, naive replace might replace wrong instance if duplicates exist.
-                    // But here we want to replace ALL instances of valid relative path with the blob.
-                    // So global replace of the path is actually what we want.
-                    // Caution: ensure we don't replace partial strings?
-                    // simpler: replace the whole tag `![alt](src)` -> `![alt](blobUrl)`
                     const newTag = `![${alt}](${urlMap[src]})`;
                     newMarkdown = newMarkdown.split(fullMatch).join(newTag);
                 }
@@ -749,6 +856,9 @@
                 li.onclick = () => loadDriveFile(file.id, file.name);
                 fileList.appendChild(li);
             });
+
+            // Trigger Prefetch (Top 5 visible)
+            prefetchFiles(files);
         }
 
         // Basic Frontmatter Parser (YAML-like)
@@ -1016,6 +1126,115 @@
                     const input = "![test](blob:abc)";
                     const result = restoreImages(input);
                     assert.equal(result, "![test](original.png)");
+                });
+                QUnit.test('resolveImages handles parent traversal', async assert => {
+                    const done = assert.async();
+                    const markdown = "![img](../sibling/image.png)";
+                    const startParent = "current-folder";
+
+                    testOverrides.getFileMeta = async (id) => {
+                        if (id === 'current-folder') return { parents: ['parent-folder'] };
+                        return { parents: [] };
+                    };
+
+                    testOverrides.listFiles = async (q) => {
+                        // finding sibling folder in parent
+                        if (q.includes(`'parent-folder' in parents`) && q.includes(`name = 'sibling'`)) {
+                            return { result: { files: [{ id: 'sibling-folder', name: 'sibling', mimeType: 'application/vnd.google-apps.folder' }] } };
+                        }
+                        // finding image in sibling folder
+                        if (q.includes(`'sibling-folder' in parents`) && q.includes(`name = 'image.png'`)) {
+                            return { result: { files: [{ id: 'target-file', name: 'image.png' }] } };
+                        }
+                        return { result: { files: [] } };
+                    };
+
+                    testOverrides.fetchBlob = async () => new Blob(['fake']);
+
+                    const originalCreateObjectUrl = URL.createObjectURL;
+                    URL.createObjectURL = () => "blob:test";
+
+                    try {
+                        const result = await resolveImages(markdown, startParent);
+                        assert.ok(result.includes("(blob:test)"), "Parent path resolved");
+                        assert.equal(imageMap.get("blob:test"), "../sibling/image.png");
+                    } finally {
+                        URL.createObjectURL = originalCreateObjectUrl;
+                        done();
+                    }
+                });
+            });
+
+            QUnit.module('Prefetching & Caching', hooks => {
+                hooks.beforeEach(() => {
+                    fileCache.clear();
+                    imageMap.clear();
+                    currentFileId = null;
+                    testOverrides.listFiles = async () => ({ result: { files: [] } });
+                    testOverrides.getFile = async () => ({ body: "content" });
+                    testOverrides.getFileMeta = async () => ({ result: { parents: ['parent'] } });
+                    testOverrides.fetchBlob = async () => new Blob(['fake']);
+                });
+
+                QUnit.test('prefetchFiles populates cache', async assert => {
+                    const done = assert.async();
+                    const mockFiles = [{ id: 'f1', name: 'File 1' }, { id: 'f2', name: 'File 2' }];
+
+                    // Mock getFile
+                    testOverrides.getFile = async (id) => {
+                        return { body: `Content of ${id}` };
+                    };
+
+                    await prefetchFiles(mockFiles);
+
+                    assert.ok(fileCache.has('f1'), "Cache has File 1");
+                    assert.ok(fileCache.has('f2'), "Cache has File 2");
+
+                    // Wait for promises to resolve
+                    const f1Data = await fileCache.get('f1');
+                    assert.ok(f1Data.body.includes('Content of f1'), "Cache resolved correct content");
+
+                    done();
+                });
+
+                QUnit.test('loadDriveFile uses cache if available', async assert => {
+                    const done = assert.async();
+                    const fileId = 'cached-file';
+
+                    // Pre-seed cache
+                    fileCache.set(fileId, Promise.resolve({
+                        body: 'Cached Content',
+                        frontmatter: '',
+                        imageMap: new Map([['blob:url', 'img.png']])
+                    }));
+
+                    let fetchCalled = false;
+                    testOverrides.getFile = async () => { fetchCalled = true; return { body: 'New Content' }; };
+
+                    await loadDriveFile(fileId, 'Cached File');
+
+                    assert.notOk(fetchCalled, "Did NOT fetch from Drive");
+                    assert.equal(imageMap.get('blob:url'), 'img.png', "Global imageMap restored from cache");
+
+                    done();
+                });
+
+                QUnit.test('saveDriveFile invalidates cache', async assert => {
+                    const done = assert.async();
+                    const fileId = 'save-file';
+                    currentFileId = fileId;
+                    currentFrontmatter = "";
+
+                    // Pre-seed cache
+                    fileCache.set(fileId, Promise.resolve({ body: 'Old', frontmatter: '', imageMap: new Map() }));
+
+                    testOverrides.updateFile = async () => { }; // successful save
+
+                    await saveDriveFile('New Content');
+
+                    assert.notOk(fileCache.has(fileId), "Cache cleared after save");
+
+                    done();
                 });
             });
         }
