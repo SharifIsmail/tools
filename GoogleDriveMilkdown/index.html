@@ -45,6 +45,47 @@
             text-align: center;
         }
 
+        #setup-section {
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: #fff;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .setup-card {
+            padding: 30px;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            width: 400px;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+        }
+
+        .setup-field {
+            margin-bottom: 15px;
+            text-align: left;
+        }
+
+        .setup-field label {
+            display: block;
+            margin-bottom: 5px;
+            font-weight: 500;
+        }
+
+        .setup-field input {
+            width: 100%;
+            padding: 8px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+        }
+
         #file-search {
             padding: 10px;
             border-bottom: 1px solid var(--border);
@@ -134,6 +175,14 @@
             cursor: not-allowed;
         }
 
+        .btn-text {
+            background: none;
+            color: #666;
+            margin-top: 10px;
+            font-size: 0.8em;
+            text-decoration: underline;
+        }
+
         .status-badge {
             font-size: 0.85em;
             padding: 4px 8px;
@@ -176,6 +225,10 @@
             width: auto;
         }
 
+        body.testing #setup-section {
+            display: none !important;
+        }
+
         body.testing #qunit,
         body.testing #qunit-fixture {
             display: block;
@@ -186,12 +239,39 @@
 
 <body>
 
+    <!-- Setup Section (Initial State) -->
+    <div id="setup-section" style="display: none;">
+        <div class="setup-card">
+            <h2 style="margin-top:0;">Setup Google Drive Access</h2>
+            <p style="color:#666; font-size:0.9em; margin-bottom:20px;">
+                Enter your Google Cloud Project credentials. <br>
+                These are stored locally in your browser.
+            </p>
+
+            <div class="setup-field">
+                <label>Client ID</label>
+                <input type="text" id="setup_client_id" placeholder="...apps.googleusercontent.com">
+            </div>
+
+            <div class="setup-field">
+                <label>API Key</label>
+                <input type="text" id="setup_api_key" placeholder="AIza...">
+            </div>
+
+            <button class="btn" onclick="saveConfig()">Save & Continue</button>
+        </div>
+    </div>
+
     <div id="sidebar">
         <div id="auth-section">
             <h2>Drive Editor</h2>
             <button id="authorize_button" class="btn" onclick="handleAuthClick()">Authorize Drive</button>
             <button id="signout_button" class="btn" onclick="handleSignoutClick()"
                 style="display: none; background-color: #dc3545;">Sign Out</button>
+
+            <div>
+                <button class="btn btn-text" onclick="resetConfig()">Reset Credentials</button>
+            </div>
         </div>
         <div id="file-search">
             <input type="text" id="search_input" placeholder="Search .md files..." disabled>
@@ -227,10 +307,13 @@
         /*******************************************************
          * CONFIGURATION
          *******************************************************/
-        const CLIENT_ID = '112047506162-5lphksopq4fss8hnh9jpdi8uk8805hoc.apps.googleusercontent.com'; // <--- REPLACE THIS
-        const API_KEY = 'AIzaSyARvE4eIk7GSicDRN44tjw72YrUKVHPUpg';       // <--- REPLACE THIS
         const DISCOVERY_DOC = 'https://www.googleapis.com/discovery/v1/apis/drive/v3/rest';
         const SCOPES = 'https://www.googleapis.com/auth/drive';
+
+        let CONFIG = {
+            clientId: '',
+            apiKey: ''
+        };
 
         // --- App State ---
         let tokenClient;
@@ -249,11 +332,65 @@
         const fileList = document.getElementById('file-list');
         const fileNameSpan = document.getElementById('current-filename');
         const statusSpan = document.getElementById('save-status');
+        const setupSection = document.getElementById('setup-section');
+        const setupClientId = document.getElementById('setup_client_id');
+        const setupApiKey = document.getElementById('setup_api_key');
 
         // --- Test Mode Check ---
         const urlParams = new URLSearchParams(window.location.search);
         const isTestMode = urlParams.get('test') === 'true';
         const testOverrides = {}; // For mocking in tests
+
+        // --- Config Management ---
+        function loadConfig() {
+            if (isTestMode) {
+                // Mock config for testing
+                CONFIG.clientId = 'mock-client-id';
+                CONFIG.apiKey = 'mock-api-key';
+                return true;
+            }
+
+            const stored = localStorage.getItem('drive_editor_config');
+            if (stored) {
+                try {
+                    const parsed = JSON.parse(stored);
+                    if (parsed.clientId && parsed.apiKey) {
+                        CONFIG = parsed;
+                        return true;
+                    }
+                } catch (e) {
+                    console.error('Invalid config', e);
+                }
+            }
+            return false;
+        }
+
+        window.saveConfig = () => {
+            const clientId = setupClientId.value.trim();
+            const apiKey = setupApiKey.value.trim();
+
+            if (!clientId || !apiKey) {
+                alert('Please enter both Client ID and API Key');
+                return;
+            }
+
+            const newConfig = { clientId, apiKey };
+            localStorage.setItem('drive_editor_config', JSON.stringify(newConfig));
+            // Reload to init
+            window.location.reload();
+        }
+
+        window.resetConfig = () => {
+            if (confirm('Are you sure you want to remove your credentials?')) {
+                localStorage.removeItem('drive_editor_config');
+                window.location.reload();
+            }
+        }
+
+        // Initialize Call
+        if (!loadConfig()) {
+            setupSection.style.display = 'flex';
+        }
 
         /*******************************************************
          * I. GOOGLE DRIVE API
@@ -262,6 +399,12 @@
         // 1. Initialization
         window.handleAuthClick = () => {
             if (isTestMode && testOverrides.handleAuthClick) return testOverrides.handleAuthClick();
+
+            if (!CONFIG.clientId) {
+                console.error("Config missing");
+                return;
+            }
+
             tokenClient.callback = async (resp) => {
                 if (resp.error !== undefined) {
                     throw (resp);
@@ -288,9 +431,11 @@
 
         async function gapiLoaded() {
             if (isTestMode) return;
+            if (!CONFIG.apiKey) return; // Wait for config
+
             gapi.load('client', async () => {
                 await gapi.client.init({
-                    apiKey: API_KEY,
+                    apiKey: CONFIG.apiKey,
                     discoveryDocs: [DISCOVERY_DOC],
                 });
                 gapiInited = true;
@@ -300,8 +445,10 @@
 
         async function gisLoaded() {
             if (isTestMode) return;
+            if (!CONFIG.clientId) return; // Wait for config
+
             tokenClient = google.accounts.oauth2.initTokenClient({
-                client_id: CLIENT_ID,
+                client_id: CONFIG.clientId,
                 scope: SCOPES,
                 callback: '', // defined later
             });
