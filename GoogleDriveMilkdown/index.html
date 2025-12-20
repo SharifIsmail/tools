@@ -435,7 +435,7 @@
                         // Use a local map for this file
                         const fileImageMap = new Map();
                         if (parentId) {
-                            displayBody = await resolveImages(body, parentId, fileImageMap);
+                            displayBody = await resolveResources(body, parentId, fileImageMap);
                         }
 
                         return {
@@ -612,7 +612,7 @@
 
                     if (parentId) {
                         setStatus('loading', 'Loading images...');
-                        displayBody = await resolveImages(body, parentId, fileImageMap);
+                        displayBody = await resolveResources(body, parentId, fileImageMap);
                     }
 
                     loadedData = {
@@ -762,69 +762,142 @@
             return currentId;
         }
 
-        async function resolveImages(markdown, parentId, targetMap = null) {
+        async function resolveResources(markdown, parentId, targetMap = null) {
             const mapToUse = targetMap || imageMap;
             if (!targetMap) imageMap.clear();
 
-            const regex = /!\[([^\]]*)\]\(([^)]+)\)/g;
-            let match;
-            const updates = [];
+            // Match both images ![]() and links []()
+            // We use a combined regex or two separate passes. 
+            // Better to use two separate passes to avoid complex group logic, 
+            // or specific regex for each.
 
-            // 1. Find all local images
-            while ((match = regex.exec(markdown)) !== null) {
+            let newMarkdown = markdown;
+
+            // 1. IMAGES: ![]()
+            const imgRegex = /!\[([^\]]*)\]\(([^)]+)\)/g;
+            let match;
+            const imgUpdates = [];
+
+            while ((match = imgRegex.exec(markdown)) !== null) {
                 const [fullMatch, alt, src] = match;
                 if (!src.startsWith('http') && !src.startsWith('data:')) {
-                    updates.push({ fullMatch, alt, src });
+                    imgUpdates.push({ fullMatch, alt, src, type: 'image' });
                 }
             }
 
-            if (updates.length === 0) return markdown;
+            // 2. LINKS: []() (excluding images starting with !)
+            // Negative lookbehind is supported in modern JS, but careful with browser compat.
+            // Simpler: Match []() and check if index-1 is !
+            const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+            const linkUpdates = [];
+            while ((match = linkRegex.exec(markdown)) !== null) {
+                if (match.index > 0 && markdown[match.index - 1] === '!') continue; // Skip images
 
-            // 2. Fetch blobs for each unique local image
-            // We use a Set to avoid fetching same image twice
-            const uniqueSrcs = [...new Set(updates.map(u => u.src))];
-            const urlMap = {}; // src -> blobUrl
+                const [fullMatch, text, href] = match;
+                if (!href.startsWith('http') && !href.startsWith('mailto:') && !href.startsWith('#')) {
+                    linkUpdates.push({ fullMatch, text, href, type: 'link' });
+                }
+            }
 
-            console.log('[MilkdownImage] Resolving images in parent:', parentId, uniqueSrcs);
+            const allUpdates = [...imgUpdates, ...linkUpdates];
+            if (allUpdates.length === 0) return newMarkdown;
+
+            const uniquePaths = [...new Set(allUpdates.map(u => u.type === 'image' ? u.src : u.href))];
+            const urlMap = {}; // path -> { url: string, isMd: boolean, id: string }
+
+            console.log('[MilkdownResource] Resolving resources in parent:', parentId, uniquePaths);
             if (!parentId) {
-                console.warn('[MilkdownImage] No parent ID found, cannot resolve sibling images.');
                 return markdown;
             }
 
-            await Promise.all(uniqueSrcs.map(async (src) => {
+            await Promise.all(uniquePaths.map(async (path) => {
                 try {
-                    // Resolve nested path
-                    const fileId = await findFileIdByPath(parentId, src);
-
+                    const fileId = await findFileIdByPath(parentId, path);
                     if (fileId) {
-                        console.log(`[MilkdownImage] Found ${src} -> ${fileId}`);
+                        // Check file type (we need metadata for links to decide navigation vs download)
+                        const resp = (isTestMode && testOverrides.getFileMeta)
+                            ? await testOverrides.getFileMeta(fileId)
+                            : await gapi.client.drive.files.get({ fileId: fileId, fields: 'name, mimeType' });
 
-                        // Fetch content as blob
-                        const token = (isTestMode ? 'mock-token' : gapi.client.getToken().access_token);
+                        const meta = isTestMode ? resp : resp.result;
+                        const isMd = meta.name.endsWith('.md');
 
-                        const blob = await fetchBlob(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
-                            'Authorization': `Bearer ${token}`
-                        });
-
-                        const blobUrl = URL.createObjectURL(blob);
-                        urlMap[src] = blobUrl;
-                        mapToUse.set(blobUrl, src);
-                    } else {
-                        console.warn(`[MilkdownImage] Image not found in Drive: ${src}`);
+                        if (isMd) {
+                            // Markdown File -> Navigation
+                            // We construct a special internal link
+                            urlMap[path] = { url: `javascript:void(0);`, onclick: `loadDriveFile('${fileId}', '${meta.name.replace(/'/g, "\\'")}')`, isMd: true };
+                        } else {
+                            // Binary Resource -> Blob Download
+                            const token = (isTestMode ? 'mock-token' : gapi.client.getToken().access_token);
+                            const blob = await fetchBlob(`https://www.googleapis.com/drive/v3/files/${fileId}?alt=media`, {
+                                'Authorization': `Bearer ${token}`
+                            });
+                            const blobUrl = URL.createObjectURL(blob);
+                            urlMap[path] = { url: blobUrl, isMd: false };
+                            mapToUse.set(blobUrl, path); // Track for restore (images only? or also file links?)
+                            // We should track file links too if we want to restore them on save.
+                        }
                     }
                 } catch (e) {
-                    console.warn(`[MilkdownImage] Failed to load image ${src}`, e);
+                    console.warn(`[Milkdown] Failed to resolve ${path}`, e);
                 }
             }));
 
-            // 3. Replace in markdown
-            let newMarkdown = markdown;
-            updates.forEach(({ fullMatch, alt, src }) => {
-                if (urlMap[src]) {
-                    const newTag = `![${alt}](${urlMap[src]})`;
-                    newMarkdown = newMarkdown.split(fullMatch).join(newTag);
+            // Replace in Markdown
+            // We must be careful about overlapping replacements.
+            // Since we collected matches from original string in order, 
+            // we should replace carefully. 
+            // Simplest is to iterate unique matches and do global replace of precise string 
+            // BUT collision risk: [link](path) and [link2](path) OK.
+            // [link](path) and [link](path) OK.
+
+            // Re-run regex replacements is safer?
+
+            // Apply Image Replacements
+            for (const item of imgUpdates) {
+                if (urlMap[item.src]) {
+                    const newUrl = urlMap[item.src].url;
+                    // Images are always blob URLs here
+                    const newTag = `![${item.alt}](${newUrl})`;
+                    // Global replace distinctive string
+                    newMarkdown = newMarkdown.split(item.fullMatch).join(newTag);
                 }
-            });
+            }
+
+            // Apply Link Replacements
+            for (const item of linkUpdates) {
+                if (urlMap[item.href]) {
+                    const mapped = urlMap[item.href];
+                    let newTag;
+                    if (mapped.isMd) {
+                        // We need to inject onclick. Markdown syntax [text](url) converts to <a href="url">text</a>.
+                        // We can't easily inject onclick via standard markdown.
+                        // Milkdown might sanitize `javascript:`.
+                        // Alternative: Use a query param or hash? `?fileId=...` and listen for clicks?
+                        // Or just use javascript: protocol if allowed.
+                        // Let's try `javascript:loadDriveFile(...)`. Commonmark often allows it or we configure it.
+
+                        // BUT Milkdown/Prosemirror might need configuration to allow javascript: hrefs.
+                        // A safer way for SPA: use a custom protocol/hash: `#drive:${fileId}` and global listener?
+                        // Let's stick to javascript: first, if it fails we add listener.
+
+                        // We can't inject onclick attribute in markdown.
+                        // So we use: [text](javascript:window.loadDriveFile(...))
+
+                        const cleanId = mapped.onclick.match(/'([^']+)'/)?.[1];
+                        const cleanName = mapped.onclick.match(/, ?'([^']+)'/)?.[1];
+
+                        if (cleanId && cleanName) {
+                            newTag = `[${item.text}](javascript:window.loadDriveFile('${cleanId}','${cleanName.replace(/'/g, "\\'")}'))`;
+                        } else {
+                            newTag = `[${item.text}](javascript:void(0))`;
+                        }
+                    } else {
+                        newTag = `[${item.text}](${mapped.url})`;
+                    }
+                    newMarkdown = newMarkdown.split(item.fullMatch).join(newTag);
+                }
+            }
 
             return newMarkdown;
         }
@@ -1092,6 +1165,13 @@
                         return { result: { files: [] } };
                     };
 
+                    // Mock Meta for file type check
+                    testOverrides.getFileMeta = async (id) => {
+                        if (id === 'file1' || id === 'file-icon') return { name: 'image.png' }; // Not .md
+                        if (id === 'folder-assets') return { name: 'assets', mimeType: 'application/vnd.google-apps.folder' };
+                        return { name: 'unknown' };
+                    };
+
                     // Mock Fetch
                     testOverrides.fetchBlob = async (url) => {
                         if (url.includes('files/file1') || url.includes('files/file-icon')) {
@@ -1105,7 +1185,7 @@
                     URL.createObjectURL = (blob) => "blob:test-url";
 
                     try {
-                        const result = await resolveImages(markdown, mockParent);
+                        const result = await resolveResources(markdown, mockParent);
 
                         // Check test.png
                         assert.ok(result.includes("![img1](blob:test-url)"), "img1 (flat) replaced");
@@ -1149,19 +1229,50 @@
                         return { result: { files: [] } };
                     };
 
+                    testOverrides.getFileMeta = async (id) => {
+                        if (id === 'target-file') return { name: 'image.png' };
+                        if (id === 'sibling-folder') return { name: 'sibling', mimeType: 'application/vnd.google-apps.folder' };
+                        if (id === 'current-folder') return { parents: ['parent-folder'] };
+                        return { parents: [] };
+                    };
+
                     testOverrides.fetchBlob = async () => new Blob(['fake']);
 
                     const originalCreateObjectUrl = URL.createObjectURL;
                     URL.createObjectURL = () => "blob:test";
 
                     try {
-                        const result = await resolveImages(markdown, startParent);
+                        const result = await resolveResources(markdown, startParent);
                         assert.ok(result.includes("(blob:test)"), "Parent path resolved");
                         assert.equal(imageMap.get("blob:test"), "../sibling/image.png");
                     } finally {
                         URL.createObjectURL = originalCreateObjectUrl;
                         done();
                     }
+                });
+
+                QUnit.test('resolveResources handles markdown links', async assert => {
+                    const done = assert.async();
+                    const markdown = "Check [Notes](../folder/notes.md)";
+                    const startParent = "current-folder";
+
+                    testOverrides.getFileMeta = async (id) => {
+                        if (id === 'current-folder') return { parents: ['parent'] };
+                        if (id === 'target-id') return { name: 'notes.md' };
+                        return { parents: [] };
+                    };
+
+                    testOverrides.listFiles = async (q) => {
+                        if (q.includes(`'parent' in parents`) && q.includes(`name = 'folder'`))
+                            return { result: { files: [{ id: 'folder-id', mimeType: 'application/vnd.google-apps.folder' }] } };
+                        if (q.includes(`'folder-id' in parents`) && q.includes(`name = 'notes.md'`))
+                            return { result: { files: [{ id: 'target-id', name: 'notes.md', mimeType: 'text/markdown' }] } };
+                        return { result: { files: [] } };
+                    };
+
+                    const result = await resolveResources(markdown, startParent);
+                    assert.ok(result.includes("javascript:window.loadDriveFile('target-id','notes.md')"), "Link converted to internal nav");
+                    done();
                 });
             });
 
