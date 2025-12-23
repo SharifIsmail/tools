@@ -25,18 +25,18 @@ classDiagram
     namespace External_Systems {
         class GoogleDriveAPI["Google Drive API"]
         class OpenAI["OpenAI / Gemini API"]
-        class IndexedDB["Browser IndexedDB"]
+        class SQLite["SQLite (OPFS / WASM)"]
     }
 
     namespace Application_Logic {
-        class Store["State Store (Zustand/Redux)"] {
+        class Store["State Store (Zustand)"] {
             +auth_state
             +file_tree
-            +current_file_content
+            +current_file
             +settings
         }
         
-        class VFS["VirtualFileSystem"] {
+        class VFS["VirtualFileSystem (Worker)"] {
             +listFiles()
             +readFile(id)
             +writeFile(id, content)
@@ -80,7 +80,7 @@ classDiagram
 
     %% VFS Internals
     VFS --> DriveAdapter : Network Sync
-    VFS --> IndexedDB : Caching
+    VFS --> SQLite : Cache & Metadata
     DriveAdapter --> GoogleDriveAPI : API Calls
 
     %% Service Dependencies
@@ -94,42 +94,43 @@ classDiagram
 | Module | Responsible For | Communicates With |
 | :--- | :--- | :--- |
 | **Store** | Single Source of Truth. Dispatches actions. | VFS, IndexService, AIService |
-| **VFS** | **Repository Pattern**. Manages Caching (IndexedDB) & Syncing (Drive). | DriveAdapter, IndexedDB |
+| **VFS** | **Repository Pattern**. Manages Caching (**SQLite**) & Syncing (Drive). Runs in **WebWorker**. | DriveAdapter, SQLite |
 | **DriveAdapter** | Minimal GAPI wrapper. | GAPI (External) |
-| **IndexService** | Maintaining **Keyword/Entity Index** & syncing to App Root. | VFS, AIService |
+| **IndexService** | Maintaining **FTS5 Index** Tables. | VFS, AIService |
 | **AIService** | Abstraction for LLM calls (Metadata Extraction). | External APIs |
 
 
 ## 3. Parallel Development Strategy
 
-*   **Developer A (Core/VFS)**: Implement `VirtualFileSystem`, `DriveAdapter`, and `IndexedDB` logic.
+*   **Developer A (Core/VFS)**: Implement `VirtualFileSystem` (Worker), `DriveAdapter`, and `SQLite` (wa-sqlite) setup.
 *   **Developer B (Editor)**: Implement `EditorModule` (Milkdown) and `Autosave` logic.
 *   **Developer C (UI/State)**: Build `Sidebar`, `CommandPalette`, and connect to `State Store`.
 *   **Developer D (AI/Index)**: Implement `IndexService` logic and `AIService` integration.
 
 ## 4. Indexing Strategy
 
-To fulfill the "Whole Drive" indexing requirement scalably on the client-side, the system uses a **Keyword & Entity Extraction** approach (Semantic Metadata) rather than full vector embeddings.
+To fulfill the "Whole Drive" indexing requirement scalably on the client-side, the system uses a **Keyword & Entity Extraction** approach stored in **SQLite FTS5**.
 
 ### 4.1. Index Structure
-The index is a JSON file stored via VFS at `/.app_state/index.json`. It contains:
-1.  **Metadata Map**: `FileID -> { Path, LastModified, Checksum }`
-2.  **Content Index**: `FileID -> { Summary: string, Keywords: string[], Entities: string[] }`
-3.  **Search Map**: Inverted index mapping `keyword -> [FileIDs]` for instant fuzzy search.
+The index is a set of **Relational Tables** in the SQLite DB.
+1.  **Files Table**: `id (PK), path, last_modified, checksum`
+2.  **FTS Index**: Virtual Table containing `summary, keywords, entities` supporting fast `MATCH` queries.
+3.  **Tags/Metadata**: Structured tables for future expansion.
 
 ### 4.2. Build Process (The "Background Crawler")
 The `IndexService` runs a non-blocking background loop:
-1.  **Crawler**: Calls `VFS.listFiles()` (pages of 1000). Compares `LastModified` against local Index.
-2.  **Queue**: Pushes changed/new FileIDs into a persistent `IndexingQueue` (IndexedDB).
+1.  **Crawler**: Calls `VFS.listFiles()` (pages of 1000). Compares `LastModified` against `Files Table`.
+2.  **Queue**: Pushes changed/new FileIDs into a `queue` table in SQLite.
 3.  **Worker**:
-    *   Pops batch of files from Queue.
+    *   Pops batch of files from `queue`.
     *   Calls `VFS.readFile(id)` to fetch text content.
-    *   **Calls AIService**: Sends text to LLM (e.g. `gpt-4o-mini`) with prompt: *"Extract 5 keywords, named entities, and a 1-sentence summary."*
-    *   Updates `Content Index` and `Search Map`.
-4.  **Sync**: Periodically calls `VFS.writeFile()` to save `/.app_state/index.json`.
+    *   **Calls AIService**: Sends text to LLM (e.g. `gpt-4o-mini`) with prompt: *"Extract 5 keywords, names, and 1-sentence summary."*
+    *   Updates `FTS Index` via SQL `INSERT`.
+4.  **Sync**: Periodically calls `VFS.exportDB()` to save a snapshot to `/.app_state/index.db`.
 
 ### 4.3. Search Process
 When the user queries via Command Palette:
-1.  **Local Search**: Fuzzy matches user query against the `Search Map` (Keywords/Entities/Filenames).
-2.  **Ranking**: Scores results based on match weight (Entity > Keyword > Body Text).
-3.  **Result**: Returns instant results without needing an API call at search time.
+1.  **Local Search**: Runs SQL query: `SELECT module FROM fts_index WHERE fts_index MATCH ?`.
+2.  **Ranking**: SQLite FTS5 `rank` function.
+3.  **Result**: Returns instant results.
+

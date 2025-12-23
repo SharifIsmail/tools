@@ -29,8 +29,8 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 | **REQ-PERF-01** | **Optimistic UI**: Every user interaction **MUST** result in visual feedback/state change within **20ms**. | DevTools Performance: Measure time from `Input` to next `Paint`. Must be ≤ 20ms. |
 | **REQ-PERF-02** | **Caching**: The application **MUST** implement an aggressive caching and prefetching strategy. | Check network tab for prefetching activity. |
 | **REQ-PERF-03** | **Speed**: **95%** of navigations **MUST** resolve using cached/prefetched data within **20ms**. | Perform 20 random navigations. 19/20 must load instantly (<20ms) without network blocking. |
-| **REQ-PERF-04** | **Persistence**: Cache **MUST** be persisted to **IndexedDB** to survive session restarts. | Reload page/browser. Navigate to previously visited file. Verify 0 network requests for content. |
-| **REQ-PERF-05** | **Eviction Policy**: Cache **MUST** enforce a **Developer-Configurable TOTAL** size limit (in MB) using an **LRU** (Least Recently Used) eviction policy. | Set small limit (e.g. 1MB). Load files > 1MB total. Verify least recently accessed files are removed from IndexedDB. |
+| **REQ-PERF-04** | **Persistence**: Cache **MUST** be persisted to **SQLite (via OPFS/WASM)** to ensure high-performance query capability and offline availability. | Reload page. Query via Console `SELECT * FROM cache`. Check persistence. |
+| **REQ-PERF-05** | **Eviction Policy**: Cache **MUST** enforce a **Developer-Configurable TOTAL** size limit (in MB) using an **LRU** eviction policy implemented via SQL. | Set limit 1MB. Insert 2MB blobs. Verify `count(*)` decreases to maintain usage limits. |
 
 ## 4. Functional Requirements
 
