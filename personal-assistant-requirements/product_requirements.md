@@ -79,8 +79,9 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 | ID | Requirement | Verification Method |
 | :--- | :--- | :--- |
 | **REQ-AI-01** | **External API**: AI processing **MUST** be performed via external API (e.g., OpenAI, Gemini) to maintain "static site" architecture. | Configure valid API key. Verify app sends request to external endpoint (Network tab). |
-| **REQ-AI-02** | **Indexing**: App **MUST** build and maintain an AI-searchable index of file contents, stored in the App State Folder. | Add new files. Trigger index. Verify index file in Drive is updated. |
+| **REQ-AI-02** | **Indexing Strategy**: App **MUST** build a search index for the **Entire Drive** by extracting **Keywords, Entities, and Summaries** (not full embeddings) via AI. | Add file in random folder. Wait for crawler. Verify file keywords appear in App State index. |
 | **REQ-AI-03** | **API Key Security**: Users **MUST** be able to input API keys safely (e.g., stored in LocalStorage/Session, never committed or shared). | input API key. Reload. Verify key persists locally but is not synced to Drive file content. |
+| **REQ-AI-04** | **Background Crawling**: The indexing process **MUST** run in the background (step-by-step), maintaining a persistent queue of un-indexed files to process in parallel batches. | Open app. Verify UI is responsive while "Indexing" indicator is active. Close/Reopen app. Verify indexing resumes where left off. |
 
 ## 7. UI & UX
 
