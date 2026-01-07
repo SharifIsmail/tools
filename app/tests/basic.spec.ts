@@ -10,9 +10,12 @@ test.describe("App shell", () => {
 
   test("shows copy badge when editing external file", async ({ page }) => {
     await page.goto("/");
+    await page.getByText("Files").waitFor({ state: "visible" });
     await page.keyboard.press("Control+K");
-    await page.getByPlaceholder("Search files...").fill("Outside");
-    await page.getByRole("button", { name: /Outside/ }).click();
+    const input = page.getByPlaceholder("Search files...").first();
+    await input.waitFor({ state: "visible" });
+    await input.fill("Outside");
+    await page.getByRole("button", { name: /Outside/ }).first().click();
     const editor = page.getByRole("textbox", { name: "Document editor" });
     await editor.click();
     await editor.type(" update");
