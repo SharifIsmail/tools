@@ -1,5 +1,6 @@
-import { describe, expect, it } from "vitest";
-import { ALLOWED_SCOPES } from "./auth";
+import { beforeEach, describe, expect, it, vi } from "vitest";
+import * as pkce from "./pkce";
+import { ALLOWED_SCOPES, buildAuthRequest, handleAuthCallback } from "./auth";
 
 describe("OAuth scopes", () => {
   it("uses only permitted Drive scopes", () => {
@@ -7,5 +8,50 @@ describe("OAuth scopes", () => {
     expect(ALLOWED_SCOPES).toContain("https://www.googleapis.com/auth/drive.file");
     expect(ALLOWED_SCOPES).toContain("https://www.googleapis.com/auth/drive.labels");
     expect(ALLOWED_SCOPES.some((s) => s === "https://www.googleapis.com/auth/drive")).toBe(false);
+  });
+
+  describe("buildAuthRequest", () => {
+    beforeEach(() => {
+      sessionStorage.clear();
+      vi.spyOn(pkce, "generateCodeVerifier").mockReturnValue("verifier-123");
+      vi.spyOn(pkce, "sha256").mockResolvedValue("challenge-xyz");
+      vi.spyOn(global.crypto, "randomUUID").mockReturnValue("state-abc");
+    });
+
+    it("constructs auth URL with allowed scopes and stores verifier/state", async () => {
+      const { url, state, verifier } = await buildAuthRequest();
+      const parsed = new URL(url);
+      expect(parsed.origin + parsed.pathname).toBe("https://accounts.google.com/o/oauth2/v2/auth");
+      const scopes = parsed.searchParams.get("scope")?.split(" ");
+      expect(scopes).toEqual(ALLOWED_SCOPES);
+      expect(parsed.searchParams.get("client_id")).toBe("112047506162-5lphksopq4fss8hnh9jpdi8uk8805hoc.apps.googleusercontent.com");
+      expect(parsed.searchParams.get("code_challenge")).toBe("challenge-xyz");
+      expect(parsed.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(parsed.searchParams.get("state")).toBe("state-abc");
+      expect(state).toBe("state-abc");
+      expect(verifier).toBe("verifier-123");
+      expect(sessionStorage.getItem("app.oauth.verifier")).toBe("verifier-123");
+      expect(sessionStorage.getItem("app.oauth.state")).toBe("state-abc");
+    });
+  });
+
+  describe("handleAuthCallback", () => {
+    beforeEach(() => {
+      sessionStorage.clear();
+      localStorage.clear();
+    });
+
+    it("returns undefined and does not call token endpoint when state is invalid", async () => {
+      sessionStorage.setItem("app.oauth.verifier", "verifier-123");
+      sessionStorage.setItem("app.oauth.state", "expected-state");
+      const spy = vi.spyOn(global, "fetch" as never);
+      Object.defineProperty(window, "location", {
+        value: new URL("https://example.com/auth/callback?code=abc&state=bad-state"),
+        writable: true,
+      });
+      const result = await handleAuthCallback();
+      expect(result).toBeUndefined();
+      expect(spy).not.toHaveBeenCalled();
+    });
   });
 });

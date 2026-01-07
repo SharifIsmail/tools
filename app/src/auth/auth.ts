@@ -50,25 +50,35 @@ function consumeVerifier() {
   return { verifier, state };
 }
 
-export function startLogin() {
+export async function buildAuthRequest() {
   const verifier = generateCodeVerifier();
   const state = crypto.randomUUID();
   const redirectUri = `${window.location.origin}/auth/callback`;
-  sha256(verifier).then((challenge) => {
-    saveVerifier(verifier, state);
-    const params = new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      redirect_uri: redirectUri,
-      response_type: "code",
-      scope: ALLOWED_SCOPES.join(" "),
-      access_type: "offline",
-      include_granted_scopes: "true",
-      prompt: "consent",
-      state,
-      code_challenge_method: "S256",
-      code_challenge: challenge,
-    });
-    window.location.href = `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`;
+  const challenge = await sha256(verifier);
+  saveVerifier(verifier, state);
+  const params = new URLSearchParams({
+    client_id: GOOGLE_CLIENT_ID,
+    redirect_uri: redirectUri,
+    response_type: "code",
+    scope: ALLOWED_SCOPES.join(" "),
+    access_type: "offline",
+    include_granted_scopes: "true",
+    prompt: "consent",
+    state,
+    code_challenge_method: "S256",
+    code_challenge: challenge,
+  });
+  return {
+    url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
+    state,
+    verifier,
+    redirectUri,
+  };
+}
+
+export function startLogin() {
+  buildAuthRequest().then(({ url }) => {
+    window.location.href = url;
   });
 }
 
