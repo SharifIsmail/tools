@@ -1,35 +1,27 @@
 import { test, expect } from "./fixtures";
 
 test.describe("OAuth callback failure", () => {
-  test.use({
-    allowedHttpErrors: [/oauth2\.googleapis\.com\/token/],
-    allowedConsoleErrors: [/Token exchange failed/, /oauth2\.googleapis\.com\/token/],
-  });
-
-  test("shows handled error when token exchange fails", async ({ page }) => {
-    await page.route("https://oauth2.googleapis.com/token", async (route) => {
-      await route.fulfill({
-        status: 400,
-        contentType: "application/json",
-        body: JSON.stringify({ error: "invalid_grant" }),
-      });
-    });
+  test("surfaces handled warning when GIS token flow fails", async ({ page }) => {
     await page.addInitScript(() => {
-      sessionStorage.setItem("app.oauth.verifier", "verifier-fail");
-      sessionStorage.setItem("app.oauth.state", "state-fail");
+      // @ts-expect-error inject mock GIS token client
+      window.__mockGisClient = {
+        callback: (_resp: unknown) => {},
+        requestAccessToken: () => {
+          // @ts-expect-error use latest callback
+          window.__mockGisClient.callback({ error: "access_denied" });
+        },
+      };
     });
 
-    await page.goto("/auth/callback?code=bad&state=state-fail");
-    await page.waitForURL("**/");
+    await page.goto("/");
+    await page.getByRole("button", { name: "Sign in with Google" }).click();
     await page.getByText("Files").waitFor();
-    // Confirm no tokens stored after failure
+    await page.waitForFunction(() =>
+      // @ts-expect-error test hook
+      Array.isArray(window.__authDebug) && window.__authDebug.some((entry: string) => entry.includes("GIS token error")),
+    );
+
     const tokens = await page.evaluate(() => localStorage.getItem("app.oauth.tokens"));
     expect(tokens).toBeNull();
-    // Confirm warning was logged
-    const warned = await page.evaluate(() => {
-      // @ts-expect-error test hook
-      return (window.__authDebug ?? []).some((entry: string) => entry.includes("Token exchange failed"));
-    });
-    expect(warned).toBe(true);
   });
 });

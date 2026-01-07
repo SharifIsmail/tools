@@ -1,24 +1,51 @@
 import { GOOGLE_CLIENT_ID } from "../config";
-import { generateCodeVerifier, sha256 } from "./pkce";
 
 export type TokenSet = {
   accessToken: string;
-  refreshToken?: string;
   expiresAt: number;
   scope: string;
 };
 
 const STORAGE_KEY = "app.oauth.tokens";
-const VERIFIER_KEY = "app.oauth.verifier";
-const STATE_KEY = "app.oauth.state";
-const HANDLED_KEY = "app.oauth.handled";
+const SCRIPT_SRC = "https://accounts.google.com/gsi/client";
+const EXPIRY_SKEW_MS = 60_000;
+let scriptPromise: Promise<void> | null = null;
+let tokenClient: GisTokenClient | null = null;
 let currentExchange: Promise<TokenSet | undefined> | null = null;
+
+type GisTokenClient = {
+  requestAccessToken: (options: { prompt?: string }) => void;
+  callback: (resp: TokenResponse) => void;
+};
+
+type GisWindow = typeof window & {
+  __mockGisClient?: GisTokenClient;
+  google?: {
+    accounts?: {
+      oauth2?: {
+        initTokenClient: (config: {
+          client_id: string;
+          scope: string;
+          callback: (resp: TokenResponse) => void;
+        }) => GisTokenClient;
+        revoke?: (token: string, done?: () => void) => void;
+      };
+    };
+  };
+};
 
 export const ALLOWED_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
   "https://www.googleapis.com/auth/drive.file",
   "https://www.googleapis.com/auth/drive.labels",
 ];
+
+type TokenResponse = {
+  access_token: string;
+  expires_in?: number;
+  scope?: string;
+  error?: string;
+};
 
 export function loadTokens(): TokenSet | undefined {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -39,19 +66,6 @@ export function saveTokens(tokens: TokenSet | undefined) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(tokens));
 }
 
-function saveVerifier(verifier: string, state: string) {
-  sessionStorage.setItem(VERIFIER_KEY, verifier);
-  sessionStorage.setItem(STATE_KEY, state);
-}
-
-function consumeVerifier() {
-  const verifier = sessionStorage.getItem(VERIFIER_KEY) ?? "";
-  const state = sessionStorage.getItem(STATE_KEY) ?? "";
-  sessionStorage.removeItem(VERIFIER_KEY);
-  sessionStorage.removeItem(STATE_KEY);
-  return { verifier, state };
-}
-
 function trackAuthDebug(message: string) {
   try {
     const existing = (window as unknown as { __authDebug?: string[] }).__authDebug ?? [];
@@ -62,144 +76,98 @@ function trackAuthDebug(message: string) {
   }
 }
 
-export async function buildAuthRequest() {
-  currentExchange = null;
-  sessionStorage.removeItem(HANDLED_KEY);
-  const verifier = generateCodeVerifier();
-  const state = crypto.randomUUID();
-  const redirectUri = `${window.location.origin}/auth/callback`;
-  const challenge = await sha256(verifier);
-  saveVerifier(verifier, state);
-  const params = new URLSearchParams({
+function ensureGisScript(): Promise<void> {
+  if (scriptPromise) return scriptPromise;
+  if (typeof window !== "undefined" && (window as GisWindow).google?.accounts?.oauth2) {
+    scriptPromise = Promise.resolve();
+    return scriptPromise;
+  }
+  scriptPromise = new Promise((resolve, reject) => {
+    const script = document.createElement("script");
+    script.src = SCRIPT_SRC;
+    script.async = true;
+    script.onload = () => resolve();
+    script.onerror = () => reject(new Error("Failed to load Google Identity Services"));
+    document.head.appendChild(script);
+  });
+  return scriptPromise;
+}
+
+async function ensureTokenClient(): Promise<GisTokenClient> {
+  await ensureGisScript();
+  if (tokenClient) return tokenClient;
+  if (typeof window !== "undefined" && (window as GisWindow).__mockGisClient) {
+    tokenClient = (window as GisWindow).__mockGisClient ?? null;
+    return tokenClient!;
+  }
+  if (!(window as GisWindow).google?.accounts?.oauth2) {
+    throw new Error("Google Identity Services not available");
+  }
+  tokenClient = (window as GisWindow).google!.accounts!.oauth2!.initTokenClient({
     client_id: GOOGLE_CLIENT_ID,
-    redirect_uri: redirectUri,
-    response_type: "code",
     scope: ALLOWED_SCOPES.join(" "),
-    access_type: "offline",
-    include_granted_scopes: "true",
-    prompt: "consent",
-    state,
-    code_challenge_method: "S256",
-    code_challenge: challenge,
+    callback: () => {},
   });
-  return {
-    url: `https://accounts.google.com/o/oauth2/v2/auth?${params.toString()}`,
-    state,
-    verifier,
-    redirectUri,
-  };
+  return tokenClient;
 }
 
-export function startLogin() {
-  currentExchange = null;
-  sessionStorage.removeItem(HANDLED_KEY);
-  buildAuthRequest().then(({ url }) => {
-    window.location.href = url;
-  });
-}
+async function requestToken(prompt: "" | "consent" | "select_account"): Promise<TokenSet | undefined> {
+  if (currentExchange) return currentExchange;
+  const client = await ensureTokenClient();
 
-export async function handleAuthCallback(): Promise<TokenSet | undefined> {
-  if (currentExchange) {
-    return currentExchange;
-  }
-  const handledState = sessionStorage.getItem(HANDLED_KEY);
-  if (handledState === "true") {
-    return loadTokens();
-  }
-  if (handledState === "pending") {
-    if (currentExchange) return currentExchange;
-    return loadTokens();
-  }
-  const url = new URL(window.location.href);
-  const code = url.searchParams.get("code");
-  const state = url.searchParams.get("state");
-  if (!code) return undefined;
-  const { verifier, state: expectedState } = consumeVerifier();
-  if (!verifier || !state || state !== expectedState) {
-    console.warn("[Auth] Invalid OAuth state; skipping token exchange", { state, expectedState });
-    trackAuthDebug(`[Auth] Invalid OAuth state; state=${state} expected=${expectedState}`);
-    return undefined;
-  }
-  if (handledState !== "true") {
-    sessionStorage.setItem(HANDLED_KEY, "pending");
-  }
-  currentExchange = (async () => {
-    const redirectUri = `${window.location.origin}/auth/callback`;
-    const body = new URLSearchParams({
-      client_id: GOOGLE_CLIENT_ID,
-      grant_type: "authorization_code",
-      code,
-      redirect_uri: redirectUri,
-      code_verifier: verifier,
-    });
-    const response = await fetch("https://oauth2.googleapis.com/token", {
-      method: "POST",
-      headers: { "Content-Type": "application/x-www-form-urlencoded" },
-      body,
-    });
-    if (!response.ok) {
-      const text = await response.text();
-      console.warn("[Auth] Token exchange failed", { status: response.status, body: text.slice(0, 500) });
-      trackAuthDebug(`[Auth] Token exchange failed status=${response.status} body=${text.slice(0, 120)}`);
-      sessionStorage.removeItem(HANDLED_KEY);
+  currentExchange = new Promise<TokenSet | undefined>((resolve) => {
+    client.callback = (resp: TokenResponse) => {
+      if (resp.error || !resp.access_token) {
+        trackAuthDebug(`[Auth] GIS token error ${resp.error ?? "unknown"}`);
+        currentExchange = null;
+        resolve(undefined);
+        return;
+      }
+      const expiresInMs = (resp.expires_in ?? 3600) * 1000;
+      const expiresAt = Date.now() + expiresInMs;
+      const tokenSet: TokenSet = {
+        accessToken: resp.access_token,
+        expiresAt,
+        scope: resp.scope ?? ALLOWED_SCOPES.join(" "),
+      };
+      saveTokens(tokenSet);
+      trackAuthDebug("[Auth] GIS token success");
       currentExchange = null;
-      return undefined;
-    }
-    const data = await response.json();
-    const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-    const tokenSet: TokenSet = {
-      accessToken: data.access_token,
-      refreshToken: data.refresh_token,
-      expiresAt,
-      scope: data.scope,
+      resolve(tokenSet);
     };
-    saveTokens(tokenSet);
-    sessionStorage.setItem(HANDLED_KEY, "true");
-    trackAuthDebug("[Auth] Token exchange succeeded");
-    currentExchange = Promise.resolve(tokenSet);
-    return tokenSet;
-  })();
+    try {
+      client.requestAccessToken({ prompt });
+    } catch (err) {
+      trackAuthDebug(`[Auth] GIS token request threw ${String(err)}`);
+      currentExchange = null;
+      resolve(undefined);
+    }
+  });
 
   return currentExchange;
 }
 
-export async function refreshTokens(refreshToken: string): Promise<TokenSet> {
-  const body = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
-    grant_type: "refresh_token",
-    refresh_token: refreshToken,
-  });
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  if (!response.ok) {
-    throw new Error(`Token refresh failed: ${response.status}`);
-  }
-  const data = await response.json();
-  const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-  const tokenSet: TokenSet = {
-    accessToken: data.access_token,
-    refreshToken,
-    expiresAt,
-    scope: data.scope,
-  };
-  saveTokens(tokenSet);
-  return tokenSet;
+export async function startLogin(): Promise<TokenSet | undefined> {
+  saveTokens(undefined);
+  return requestToken("consent");
 }
 
 export async function getValidAccessToken(): Promise<string | undefined> {
   const tokens = loadTokens();
-  if (!tokens) return undefined;
-  if (tokens.expiresAt > Date.now() + 60_000) {
+  if (tokens && tokens.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
     return tokens.accessToken;
   }
-  if (!tokens.refreshToken) return undefined;
-  const refreshed = await refreshTokens(tokens.refreshToken);
-  return refreshed.accessToken;
+  const refreshed = await requestToken("");
+  return refreshed?.accessToken;
 }
 
 export function logout() {
   saveTokens(undefined);
+}
+
+// Test-only utility to reset internal GIS state
+export function __resetAuthForTest() {
+  scriptPromise = null;
+  tokenClient = null;
+  currentExchange = null;
 }

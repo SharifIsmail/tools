@@ -66,6 +66,16 @@ test.describe("Product requirements coverage", () => {
     await editorHost.waitFor({ state: "visible", timeout: 15000 });
     const editor = editorHost.locator(".ProseMirror").first();
     await editor.click();
+    await editor.evaluate((node) => {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      range.collapse(false);
+      const sel = window.getSelection();
+      if (sel) {
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+    });
     await editor.type(" bold sentence in wysiwyg.", { delay: 30 });
     await page.waitForTimeout(800);
     await page.getByRole("button", { name: "Source" }).click();
