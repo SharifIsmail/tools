@@ -11,7 +11,7 @@ export type AiConfig = {
   model?: string;
 };
 
-const DEFAULT_MODEL = import.meta.env.VITE_GEMINI_MODEL ?? "gemini-1.5-flash";
+const DEFAULT_MODEL = import.meta.env.VITE_GEMINI_MODEL ?? "models/gemini-flash-lite-latest";
 
 function buildPrompt(text: string) {
   return `You are indexing personal notes. Extract:
@@ -26,14 +26,22 @@ ${text.slice(0, 8000)}
 `;
 }
 
+function isForceRealGemini() {
+  return (
+    ["true", "1"].includes(((import.meta as ImportMeta).env?.VITE_FORCE_REAL_GEMINI ?? "").toString()) ||
+    Boolean((globalThis as { __forceRealGemini?: boolean }).__forceRealGemini)
+  );
+}
+
 export async function summarizeFile(file: FileRecord, config: AiConfig = {}): Promise<AiSummary> {
-  const apiKey = loadApiKey();
+  const forceReal = isForceRealGemini();
+  const apiKey = loadApiKey({ force: forceReal });
   const isE2E = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITE_E2E;
   const disableIndexer =
     ((import.meta as ImportMeta).env?.VITE_DISABLE_INDEXER ?? "") === "true" ||
     ((import.meta as ImportMeta).env?.DEV ?? false) === true;
 
-  if (!apiKey || isE2E || disableIndexer) {
+  if (!forceReal && (!apiKey || isE2E || disableIndexer)) {
     const summary = file.content?.slice(0, 120) ?? "";
     return {
       summary,
@@ -42,8 +50,23 @@ export async function summarizeFile(file: FileRecord, config: AiConfig = {}): Pr
     };
   }
 
-  const model = config.model ?? DEFAULT_MODEL;
-  const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+  if (!apiKey) {
+    throw new Error("Gemini API key is required for live summarization");
+  }
+
+  const model =
+    (globalThis as { __geminiModel?: string }).__geminiModel ??
+    config.model ??
+    (import.meta as ImportMeta).env?.VITE_GEMINI_MODEL ??
+    DEFAULT_MODEL;
+  const endpoint = `https://generativelanguage.googleapis.com/v1beta/${model}:generateContent?key=${apiKey}`;
+  if (typeof window !== "undefined") {
+    (window as unknown as { __geminiDebug?: Record<string, unknown> }).__geminiDebug = {
+      forceReal,
+      model,
+      endpoint,
+    };
+  }
   const body = {
     contents: [
       {

@@ -14,7 +14,7 @@ export default defineConfig({
   retries: 0,
   globalSetup: "./tests/global-setup.ts",
   use: {
-    baseURL: "http://localhost:4173",
+    baseURL: "http://127.0.0.1:4173",
     trace: "on-first-retry",
     video: "retain-on-failure",
     storageState: fs.existsSync(storageStatePath) ? storageStatePath : undefined,
@@ -27,9 +27,9 @@ export default defineConfig({
     },
   ],
   webServer: {
-    command: "VITE_E2E=1 npm run dev -- --host --port 4173",
-    url: "http://localhost:4173",
-    reuseExistingServer: !process.env.CI,
+    command: "VITE_E2E=1 VITE_GEMINI_MODEL=models/gemini-flash-lite-latest npm run dev -- --host 127.0.0.1 --port 4173",
+    url: "http://127.0.0.1:4173",
+    reuseExistingServer: false,
     timeout: 120 * 1000,
   },
 });
