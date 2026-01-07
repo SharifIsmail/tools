@@ -11,6 +11,7 @@ export type TokenSet = {
 const STORAGE_KEY = "app.oauth.tokens";
 const VERIFIER_KEY = "app.oauth.verifier";
 const STATE_KEY = "app.oauth.state";
+const HANDLED_KEY = "app.oauth.handled";
 
 export const ALLOWED_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
@@ -51,6 +52,7 @@ function consumeVerifier() {
 }
 
 export async function buildAuthRequest() {
+  sessionStorage.removeItem(HANDLED_KEY);
   const verifier = generateCodeVerifier();
   const state = crypto.randomUUID();
   const redirectUri = `${window.location.origin}/auth/callback`;
@@ -77,12 +79,20 @@ export async function buildAuthRequest() {
 }
 
 export function startLogin() {
+  sessionStorage.removeItem(HANDLED_KEY);
   buildAuthRequest().then(({ url }) => {
     window.location.href = url;
   });
 }
 
 export async function handleAuthCallback(): Promise<TokenSet | undefined> {
+  const handledState = sessionStorage.getItem(HANDLED_KEY);
+  if (handledState === "true") {
+    return loadTokens();
+  }
+  if (handledState === "pending") {
+    return undefined;
+  }
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
   const state = url.searchParams.get("state");
@@ -92,6 +102,7 @@ export async function handleAuthCallback(): Promise<TokenSet | undefined> {
     console.warn("Invalid OAuth state; skipping token exchange");
     return undefined;
   }
+  sessionStorage.setItem(HANDLED_KEY, "pending");
   const redirectUri = `${window.location.origin}/auth/callback`;
   const body = new URLSearchParams({
     client_id: GOOGLE_CLIENT_ID,
@@ -105,19 +116,26 @@ export async function handleAuthCallback(): Promise<TokenSet | undefined> {
     headers: { "Content-Type": "application/x-www-form-urlencoded" },
     body,
   });
-  if (!response.ok) {
-    throw new Error(`Token exchange failed: ${response.status}`);
+  try {
+    if (!response.ok) {
+      throw new Error(`Token exchange failed: ${response.status}`);
+    }
+    const data = await response.json();
+    const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
+    const tokenSet: TokenSet = {
+      accessToken: data.access_token,
+      refreshToken: data.refresh_token,
+      expiresAt,
+      scope: data.scope,
+    };
+    saveTokens(tokenSet);
+    sessionStorage.setItem(HANDLED_KEY, "true");
+    return tokenSet;
+  } finally {
+    if (!response.ok) {
+      sessionStorage.removeItem(HANDLED_KEY);
+    }
   }
-  const data = await response.json();
-  const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
-  const tokenSet: TokenSet = {
-    accessToken: data.access_token,
-    refreshToken: data.refresh_token,
-    expiresAt,
-    scope: data.scope,
-  };
-  saveTokens(tokenSet);
-  return tokenSet;
 }
 
 export async function refreshTokens(refreshToken: string): Promise<TokenSet> {

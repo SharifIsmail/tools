@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import * as pkce from "./pkce";
-import { ALLOWED_SCOPES, buildAuthRequest, handleAuthCallback } from "./auth";
+import { ALLOWED_SCOPES, buildAuthRequest, handleAuthCallback, startLogin } from "./auth";
 
 describe("OAuth scopes", () => {
   it("uses only permitted Drive scopes", () => {
@@ -52,6 +52,51 @@ describe("OAuth scopes", () => {
       const result = await handleAuthCallback();
       expect(result).toBeUndefined();
       expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("handles callback once even if invoked twice (StrictMode) and persists tokens", async () => {
+      const warnSpy = vi.spyOn(console, "warn").mockImplementation(() => {});
+      sessionStorage.setItem("app.oauth.verifier", "verifier-123");
+      sessionStorage.setItem("app.oauth.state", "state-abc");
+      Object.defineProperty(window, "location", {
+        value: new URL("https://example.com/auth/callback?code=abc&state=state-abc"),
+        writable: true,
+      });
+      const fetchSpy = vi
+        .spyOn(global, "fetch" as never)
+        .mockResolvedValue({ ok: true, json: async () => ({ access_token: "t1", expires_in: 3600, scope: "s" }) } as never);
+
+      const first = await handleAuthCallback();
+      const second = await handleAuthCallback();
+
+      expect(first?.accessToken).toBe("t1");
+      expect(second?.accessToken).toBe("t1");
+      expect(fetchSpy).toHaveBeenCalledTimes(1);
+      expect(warnSpy).not.toHaveBeenCalledWith(expect.stringContaining("Invalid OAuth state"));
+      expect(sessionStorage.getItem("app.oauth.handled")).toBe("true");
+      warnSpy.mockRestore();
+    });
+
+    it("resets handled flag when starting new login", async () => {
+      sessionStorage.setItem("app.oauth.handled", "true");
+      let hrefVal = "https://example.com/";
+      Object.defineProperty(window, "location", {
+        value: {
+          get href() {
+            return hrefVal;
+          },
+          set href(next: string) {
+            hrefVal = next;
+          },
+          origin: "https://example.com",
+        },
+        writable: true,
+      });
+      vi.spyOn(pkce, "generateCodeVerifier").mockReturnValue("verifier-456");
+      vi.spyOn(pkce, "sha256").mockResolvedValue("challenge-789");
+      vi.spyOn(global.crypto, "randomUUID").mockReturnValue("state-def");
+      await startLogin();
+      expect(sessionStorage.getItem("app.oauth.handled")).toBeNull();
     });
   });
 });
