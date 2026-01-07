@@ -116,19 +116,23 @@ const MilkdownSurface = ({
   useEffect(() => {
     const node = containerRef.current;
     if (!node) return;
-    const imgs = Array.from(node.querySelectorAll("img"));
-    imgs.forEach((img) => {
-      const src = img.getAttribute("src");
-      if (!src) return;
-      const resolved = resolveMediaSrc(src);
-      img.setAttribute("data-resolved-src", resolved);
-      img.alt = img.alt || resolved;
-      if (/^data:image/.test(resolved)) {
-        img.src = resolved;
-      } else if (!/^https?:\/\//i.test(resolved) && resolved.startsWith("/")) {
-        img.src = resolved;
-      }
-    });
+    const applyImages = () => {
+      const imgs = Array.from(node.querySelectorAll("img"));
+      imgs.forEach((img) => {
+        const src = img.getAttribute("src");
+        if (!src) return;
+        const resolved = resolveMediaSrc(src);
+        img.setAttribute("data-resolved-src", resolved);
+        img.alt = img.alt || resolved;
+        if (resolved && resolved !== src) {
+          img.src = resolved;
+        }
+      });
+    };
+    applyImages();
+    const observer = new MutationObserver(() => applyImages());
+    observer.observe(node, { subtree: true, childList: true, attributes: true, attributeFilter: ["src"] });
+    return () => observer.disconnect();
   }, [resolveMediaSrc, value]);
 
   return (

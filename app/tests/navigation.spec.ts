@@ -40,4 +40,29 @@ test.describe("Navigation flows", () => {
     });
     await expect(page.getByText("Editing copy")).toBeVisible();
   });
+
+  test("absolute link navigates to target", async ({ page }) => {
+    await page.goto("/");
+    await page.getByText("Files").waitFor({ state: "visible" });
+    await page.evaluate(() => {
+      // @ts-expect-error test helper
+      return window.__appStore?.actions.openByPath("/MyNotes/Links/Absolute.md");
+    });
+    const editorHost = page.locator('.milkdown[data-editor-ready="true"]').first();
+    await editorHost.waitFor({ state: "visible", timeout: 10000 });
+    await editorHost.locator('a:has-text("Open Absolute")').click();
+    await expect(page.locator(".editor__path", { hasText: "/MyNotes/Projects/Note.md" })).toBeVisible({ timeout: 5000 });
+  });
+
+  test("embedded images render from relative paths", async ({ page }) => {
+    await page.goto("/");
+    await page.getByText("Files").waitFor({ state: "visible" });
+    await page.evaluate(() => {
+      // @ts-expect-error test helper
+      return window.__appStore?.actions.openByPath("/MyNotes/Media/Embedded.md");
+    });
+    const img = page.locator('.milkdown img[alt="Picture.png"]').first();
+    await expect(img).toBeVisible({ timeout: 5000 });
+    await expect(img).toHaveAttribute("src", /data:image|\/MyNotes\/Media\/Picture\.png/);
+  });
 });
