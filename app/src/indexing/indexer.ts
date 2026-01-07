@@ -16,7 +16,16 @@ export function useIndexer(store: AppStore, client: VfsClient) {
   useEffect(() => {
     const isVitest = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITEST;
     const isE2E = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITE_E2E;
-    if (isVitest || isE2E) return;
+    const isDev = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.DEV;
+    const disableIndexer =
+      Boolean(isVitest) ||
+      Boolean(isDev) ||
+      Boolean(isE2E && isE2E !== "false") ||
+      ["true", "1"].includes(((import.meta as ImportMeta).env?.VITE_DISABLE_INDEXER ?? "").toString());
+    if (disableIndexer) {
+      store.actions.setIndexingState?.("idle", "Indexer disabled");
+      return;
+    }
     cancelled.current = false;
     const queue = new Set<string>();
 

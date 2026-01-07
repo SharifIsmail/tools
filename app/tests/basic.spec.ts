@@ -14,8 +14,10 @@ test.describe("App shell", () => {
     await page.keyboard.press("Control+K");
     await page.getByPlaceholder("Search files...").fill("Outside");
     await page.getByRole("button", { name: /Outside\.md/ }).click();
-    const editor = page.locator(".milkdown .ProseMirror");
-    await editor.waitFor({ state: "visible", timeout: 15000 });
+    const editorHost = page.locator('.milkdown[data-editor-ready="true"]').first();
+    await editorHost.waitFor({ state: "visible", timeout: 15000 });
+    const editor = editorHost.locator(".ProseMirror").first();
+    await page.waitForTimeout(300);
     await editor.click();
     await editor.type(" update");
     await expect(page.getByText("Editing copy")).toBeVisible({ timeout: 15000 });

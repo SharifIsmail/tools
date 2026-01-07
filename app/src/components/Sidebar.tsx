@@ -51,12 +51,14 @@ function TreeNodeView({ node, expanded, toggle }: { node: TreeNode; expanded: Se
         role="button"
         tabIndex={0}
         onClick={() => {
+          console.info("[Sidebar] header click", { path: node.path, indexFile: node.indexFileId, hasChildren });
           if (node.indexFileId) actions.openFile(node.indexFileId);
           if (hasChildren) toggle(node.path);
         }}
         onKeyDown={(e) => {
           if (e.key === "Enter" || e.key === " ") {
             e.preventDefault();
+            console.info("[Sidebar] header key", { path: node.path, key: e.key, indexFile: node.indexFileId, hasChildren });
             if (node.indexFileId) actions.openFile(node.indexFileId);
             if (hasChildren) toggle(node.path);
           }
@@ -70,7 +72,16 @@ function TreeNodeView({ node, expanded, toggle }: { node: TreeNode; expanded: Se
           {node.files
             .sort((a, b) => a.path.localeCompare(b.path))
             .map((file) => (
-              <div key={file.id} className="tree-node__file" onClick={() => actions.openFile(file.id)} role="button" tabIndex={0}>
+              <div
+                key={file.id}
+                className="tree-node__file"
+                onClick={() => {
+                  console.info("[Sidebar] file click", { id: file.id, path: file.path });
+                  void actions.openFile(file.id);
+                }}
+                role="button"
+                tabIndex={0}
+              >
                 {file.path.split("/").pop()}
               </div>
             ))}

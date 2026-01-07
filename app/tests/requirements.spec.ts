@@ -35,7 +35,6 @@ test.describe("Product requirements coverage", () => {
   });
 
   test("relative links open target files", async ({ page }) => {
-    test.skip(!hasDriveAuth, "Requires authenticated Drive session");
     await page.goto("/");
     await page.getByText("Files").waitFor({ state: "visible" });
     await page.evaluate(() => {
@@ -52,7 +51,9 @@ test.describe("Product requirements coverage", () => {
   test("autosave shows saving status", async ({ page }) => {
     await page.goto("/");
     await page.getByText("Files").waitFor({ state: "visible" });
-    const editor = page.locator(".milkdown .ProseMirror").first();
+    const editorHost = page.locator('.milkdown[data-editor-ready="true"]').first();
+    await editorHost.waitFor({ state: "visible", timeout: 15000 });
+    const editor = editorHost.locator(".ProseMirror").first();
     await editor.click();
     await editor.type(" autosave");
     await expect(page.locator(".editor__status", { hasText: "Saved" })).toBeVisible({ timeout: 5000 });
@@ -61,13 +62,20 @@ test.describe("Product requirements coverage", () => {
   test("wysiwyg editing updates content", async ({ page }) => {
     await page.goto("/");
     await page.getByText("Files").waitFor({ state: "visible" });
-    const editor = page.locator(".milkdown .ProseMirror").first();
+    const editorHost = page.locator('.milkdown[data-editor-ready="true"]').first();
+    await editorHost.waitFor({ state: "visible", timeout: 15000 });
+    const editor = editorHost.locator(".ProseMirror").first();
     await editor.click();
-    await editor.type(" bold");
-    await page.waitForTimeout(1200);
+    await editor.type(" bold sentence in wysiwyg.", { delay: 30 });
+    await page.waitForTimeout(800);
     await page.getByRole("button", { name: "Source" }).click();
     const textarea = page.locator(".editor__textarea");
-    await expect(textarea).toHaveValue(/bold/);
+    await expect(textarea).toContainText("bold sentence in wysiwyg.");
+    await textarea.click();
+    await textarea.type(" extra source text.");
+    await page.getByRole("button", { name: "WYSIWYG" }).click();
+    await expect(editor).toContainText("bold sentence in wysiwyg.");
+    await expect(editor).toContainText("extra source text.");
   });
 
   test("renders image preview and download link", async ({ page }) => {

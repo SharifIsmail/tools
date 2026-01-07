@@ -1,7 +1,7 @@
 /* eslint-disable react-hooks/set-state-in-effect */
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { MilkdownProvider, Milkdown, useEditor } from "@milkdown/react";
-import { Editor as MilkEditor, rootCtx, defaultValueCtx } from "@milkdown/core";
+import { Editor as MilkEditor, rootCtx, defaultValueCtx, editorViewOptionsCtx, EditorStatus } from "@milkdown/core";
 import { nord } from "@milkdown/theme-nord";
 import { commonmark } from "@milkdown/preset-commonmark";
 import { gfm } from "@milkdown/preset-gfm";
@@ -13,32 +13,41 @@ import { decodeWikiLinks, encodeWikiLinks } from "../lib/wikiLinks";
 import { buildImagePlaceholder, guessMimeFromPath } from "../lib/media";
 import { resolvePathMatches } from "../vfs/pathResolver";
 import { APP_ROOT_PATH } from "../config";
+import "prosemirror-view/style/prosemirror.css";
 
-function MilkdownSurface({
+const MilkdownSurface = ({
   value,
   fileId,
-  mode,
+  active,
   onChange,
   onLinkNavigate,
   resolveMediaSrc,
 }: {
   value: string;
   fileId: string;
-  mode: "wysiwyg" | "source";
+  active: boolean;
   onChange: (md: string) => void;
   onLinkNavigate: (href: string) => void;
   resolveMediaSrc: (src: string) => string;
-}) {
+}) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const lastApplied = useRef<string>("");
-  const editor = useEditor(
+  const applyingExternal = useRef(false);
+  const [ready, setReady] = useState(false);
+  const { get: getEditor, loading } = useEditor(
     (root) =>
       MilkEditor.make()
         .config((ctx) => {
           ctx.set(rootCtx, root);
           ctx.set(defaultValueCtx, value);
+          ctx.set(editorViewOptionsCtx, { editable: () => true });
           ctx.get(listenerCtx).markdownUpdated((_, md) => {
             lastApplied.current = md;
+            if (applyingExternal.current) {
+              applyingExternal.current = false;
+              return;
+            }
+            console.debug("[Milkdown] markdownUpdated", { fileId, length: md.length });
             onChange(md);
           });
         })
@@ -51,20 +60,40 @@ function MilkdownSurface({
   );
 
   useEffect(() => {
-    const instance = editor.get();
-    if (!instance) return;
-    lastApplied.current = value;
-    instance.action(replaceAll(value));
-  }, [editor, fileId]);
+    const node = containerRef.current;
+    if (!node) return;
+    const hasEditor = !loading && Boolean(getEditor());
+    setReady(hasEditor);
+    if (hasEditor) {
+      node.dataset.editorReady = "true";
+    } else {
+      delete node.dataset.editorReady;
+    }
+    return () => {
+      delete node.dataset.editorReady;
+    };
+  }, [fileId, getEditor, loading]);
 
   useEffect(() => {
-    if (mode !== "wysiwyg") return;
-    if (value === lastApplied.current) return;
-    const instance = editor.get();
+    if (!active) return;
+    if (loading) return;
+    const instance = getEditor();
     if (!instance) return;
-    lastApplied.current = value;
-    instance.action(replaceAll(value));
-  }, [editor, mode, value]);
+    if (instance.status !== EditorStatus.Created) {
+      console.debug("[Milkdown] replaceAll deferred (not ready)", { status: instance.status, fileId });
+      return;
+    }
+    if (value === lastApplied.current) return;
+    applyingExternal.current = true;
+    try {
+      console.debug("[Milkdown] replaceAll", { fileId, length: value.length });
+      instance.action(replaceAll(value));
+      lastApplied.current = value;
+    } catch (err) {
+      applyingExternal.current = false;
+      console.warn("[Milkdown] replaceAll skipped", err);
+    }
+  }, [active, getEditor, fileId, loading, value]);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -103,11 +132,19 @@ function MilkdownSurface({
   }, [resolveMediaSrc, value]);
 
   return (
-    <div ref={containerRef} className="editor__surface milkdown" role="textbox" aria-label="Document editor">
+    <div
+      ref={containerRef}
+      className="editor__surface milkdown"
+      role="textbox"
+      aria-label="Document editor"
+      data-editor-ready={ready ? "true" : undefined}
+      aria-hidden={!active}
+      style={{ display: active ? "block" : "none" }}
+    >
       <Milkdown />
     </div>
   );
-}
+};
 
 export function Editor() {
   const actions = useAppActions();
@@ -134,6 +171,10 @@ export function Editor() {
       if (shouldRevoke) URL.revokeObjectURL(url);
     };
   }, [activeFile?.id, activeFile?.content, activeFile?.path]);
+
+  const syncFromEditor = useCallback(async () => {
+    return draft;
+  }, [draft]);
 
   if (!activeFile) {
     return <div className="editor__empty">Select a file to start</div>;
@@ -172,13 +213,23 @@ export function Editor() {
           <div className="editor__mode-toggle">
             <button
               className={`mode-btn ${mode === "wysiwyg" ? "mode-btn--active" : ""}`}
-              onClick={() => setMode("wysiwyg")}
+              onClick={async () => {
+                if (mode === "source") {
+                  const latest = await syncFromEditor();
+                  if (latest !== undefined) scheduleSave(latest);
+                }
+                setMode("wysiwyg");
+              }}
             >
               WYSIWYG
             </button>
             <button
               className={`mode-btn ${mode === "source" ? "mode-btn--active" : ""}`}
-              onClick={() => setMode("source")}
+              onClick={async () => {
+                const latest = await syncFromEditor();
+                if (latest !== undefined) scheduleSave(latest);
+                setMode("source");
+              }}
             >
               Source
             </button>
@@ -186,11 +237,11 @@ export function Editor() {
           <div className="editor__status">{ui.saving ? "Saving..." : "Saved"}</div>
         </header>
         {ext === "md" ? (
-          mode === "wysiwyg" ? (
+          <>
             <MilkdownSurface
               value={encodeWikiLinks(draft)}
               fileId={activeFile.id}
-              mode={mode}
+              active={mode === "wysiwyg"}
               onLinkNavigate={handleLinkNavigate}
               resolveMediaSrc={resolveMediaSrc}
               onChange={(md) => {
@@ -198,17 +249,19 @@ export function Editor() {
                 setDraft(normalized);
                 scheduleSave(normalized);
               }}
+              key={activeFile.id}
             />
-          ) : (
-            <textarea
-              className="editor__textarea"
-              value={draft}
-              onChange={(e) => {
-                setDraft(e.target.value);
-                scheduleSave(e.target.value);
-              }}
-            />
-          )
+            {mode === "source" && (
+              <textarea
+                className="editor__textarea"
+                value={draft}
+                onChange={(e) => {
+                  setDraft(e.target.value);
+                  scheduleSave(e.target.value);
+                }}
+              />
+            )}
+          </>
         ) : ext === "txt" ? (
           <textarea
             className="editor__textarea"
