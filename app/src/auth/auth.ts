@@ -12,6 +12,7 @@ const STORAGE_KEY = "app.oauth.tokens";
 const VERIFIER_KEY = "app.oauth.verifier";
 const STATE_KEY = "app.oauth.state";
 const HANDLED_KEY = "app.oauth.handled";
+let currentExchange: Promise<TokenSet | undefined> | null = null;
 
 export const ALLOWED_SCOPES = [
   "https://www.googleapis.com/auth/drive.readonly",
@@ -51,7 +52,18 @@ function consumeVerifier() {
   return { verifier, state };
 }
 
+function trackAuthDebug(message: string) {
+  try {
+    const existing = (window as unknown as { __authDebug?: string[] }).__authDebug ?? [];
+    const next = [...existing, `${new Date().toISOString()} ${message}`];
+    (window as unknown as { __authDebug?: string[] }).__authDebug = next.slice(-50);
+  } catch {
+    // ignore debug failures
+  }
+}
+
 export async function buildAuthRequest() {
+  currentExchange = null;
   sessionStorage.removeItem(HANDLED_KEY);
   const verifier = generateCodeVerifier();
   const state = crypto.randomUUID();
@@ -79,6 +91,7 @@ export async function buildAuthRequest() {
 }
 
 export function startLogin() {
+  currentExchange = null;
   sessionStorage.removeItem(HANDLED_KEY);
   buildAuthRequest().then(({ url }) => {
     window.location.href = url;
@@ -86,12 +99,16 @@ export function startLogin() {
 }
 
 export async function handleAuthCallback(): Promise<TokenSet | undefined> {
+  if (currentExchange) {
+    return currentExchange;
+  }
   const handledState = sessionStorage.getItem(HANDLED_KEY);
   if (handledState === "true") {
     return loadTokens();
   }
   if (handledState === "pending") {
-    return undefined;
+    if (currentExchange) return currentExchange;
+    return loadTokens();
   }
   const url = new URL(window.location.href);
   const code = url.searchParams.get("code");
@@ -99,26 +116,34 @@ export async function handleAuthCallback(): Promise<TokenSet | undefined> {
   if (!code) return undefined;
   const { verifier, state: expectedState } = consumeVerifier();
   if (!verifier || !state || state !== expectedState) {
-    console.warn("Invalid OAuth state; skipping token exchange");
+    console.warn("[Auth] Invalid OAuth state; skipping token exchange", { state, expectedState });
+    trackAuthDebug(`[Auth] Invalid OAuth state; state=${state} expected=${expectedState}`);
     return undefined;
   }
-  sessionStorage.setItem(HANDLED_KEY, "pending");
-  const redirectUri = `${window.location.origin}/auth/callback`;
-  const body = new URLSearchParams({
-    client_id: GOOGLE_CLIENT_ID,
-    grant_type: "authorization_code",
-    code,
-    redirect_uri: redirectUri,
-    code_verifier: verifier,
-  });
-  const response = await fetch("https://oauth2.googleapis.com/token", {
-    method: "POST",
-    headers: { "Content-Type": "application/x-www-form-urlencoded" },
-    body,
-  });
-  try {
+  if (handledState !== "true") {
+    sessionStorage.setItem(HANDLED_KEY, "pending");
+  }
+  currentExchange = (async () => {
+    const redirectUri = `${window.location.origin}/auth/callback`;
+    const body = new URLSearchParams({
+      client_id: GOOGLE_CLIENT_ID,
+      grant_type: "authorization_code",
+      code,
+      redirect_uri: redirectUri,
+      code_verifier: verifier,
+    });
+    const response = await fetch("https://oauth2.googleapis.com/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body,
+    });
     if (!response.ok) {
-      throw new Error(`Token exchange failed: ${response.status}`);
+      const text = await response.text();
+      console.warn("[Auth] Token exchange failed", { status: response.status, body: text.slice(0, 500) });
+      trackAuthDebug(`[Auth] Token exchange failed status=${response.status} body=${text.slice(0, 120)}`);
+      sessionStorage.removeItem(HANDLED_KEY);
+      currentExchange = null;
+      return undefined;
     }
     const data = await response.json();
     const expiresAt = Date.now() + (data.expires_in ?? 3600) * 1000;
@@ -130,12 +155,12 @@ export async function handleAuthCallback(): Promise<TokenSet | undefined> {
     };
     saveTokens(tokenSet);
     sessionStorage.setItem(HANDLED_KEY, "true");
+    trackAuthDebug("[Auth] Token exchange succeeded");
+    currentExchange = Promise.resolve(tokenSet);
     return tokenSet;
-  } finally {
-    if (!response.ok) {
-      sessionStorage.removeItem(HANDLED_KEY);
-    }
-  }
+  })();
+
+  return currentExchange;
 }
 
 export async function refreshTokens(refreshToken: string): Promise<TokenSet> {

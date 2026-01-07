@@ -37,8 +37,10 @@ describe("OAuth scopes", () => {
 
   describe("handleAuthCallback", () => {
     beforeEach(() => {
+      vi.restoreAllMocks();
       sessionStorage.clear();
       localStorage.clear();
+      vi.unstubAllEnvs();
     });
 
     it("returns undefined and does not call token endpoint when state is invalid", async () => {
@@ -52,6 +54,22 @@ describe("OAuth scopes", () => {
       const result = await handleAuthCallback();
       expect(result).toBeUndefined();
       expect(spy).not.toHaveBeenCalled();
+    });
+
+    it("returns undefined on token exchange failure and clears pending flag", async () => {
+      sessionStorage.setItem("app.oauth.verifier", "verifier-123");
+      sessionStorage.setItem("app.oauth.state", "state-abc");
+      Object.defineProperty(window, "location", {
+        value: new URL("https://example.com/auth/callback?code=abc&state=state-abc"),
+        writable: true,
+      });
+      const fetchSpy = vi
+        .spyOn(global, "fetch" as never)
+        .mockResolvedValue({ ok: false, status: 400, text: async () => "bad request" } as never);
+      const result = await handleAuthCallback();
+      expect(result).toBeUndefined();
+      expect(sessionStorage.getItem("app.oauth.handled")).toBeNull();
+      expect(fetchSpy).toHaveBeenCalled();
     });
 
     it("handles callback once even if invoked twice (StrictMode) and persists tokens", async () => {

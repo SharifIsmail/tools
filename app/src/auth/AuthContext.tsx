@@ -24,6 +24,9 @@ export function AuthProvider({ children }: { children: React.ReactNode }) {
       setLoading(true);
       handleAuthCallback()
         .then((next) => setTokens(next))
+        .catch((err) => {
+          console.warn("[Auth] callback handling failed", err);
+        })
         .finally(() => {
           setLoading(false);
           setHandledCallback(true);
