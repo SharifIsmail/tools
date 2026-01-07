@@ -28,7 +28,20 @@ ${text.slice(0, 8000)}
 
 export async function summarizeFile(file: FileRecord, config: AiConfig = {}): Promise<AiSummary> {
   const apiKey = loadApiKey();
-  if (!apiKey) throw new Error("Missing Gemini API key");
+  const isE2E = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITE_E2E;
+  const disableIndexer =
+    ((import.meta as ImportMeta).env?.VITE_DISABLE_INDEXER ?? "") === "true" ||
+    ((import.meta as ImportMeta).env?.DEV ?? false) === true;
+
+  if (!apiKey || isE2E || disableIndexer) {
+    const summary = file.content?.slice(0, 120) ?? "";
+    return {
+      summary,
+      keywords: [],
+      entities: [],
+    };
+  }
+
   const model = config.model ?? DEFAULT_MODEL;
   const endpoint = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
   const body = {

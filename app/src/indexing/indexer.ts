@@ -19,8 +19,6 @@ export function useIndexer(store: AppStore, client: VfsClient) {
     const isDev = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.DEV;
     const disableIndexer =
       Boolean(isVitest) ||
-      Boolean(isDev) ||
-      Boolean(isE2E && isE2E !== "false") ||
       ["true", "1"].includes(((import.meta as ImportMeta).env?.VITE_DISABLE_INDEXER ?? "").toString());
     if (disableIndexer) {
       store.actions.setIndexingState?.("idle", "Indexer disabled");
@@ -44,12 +42,6 @@ export function useIndexer(store: AppStore, client: VfsClient) {
           files.map((f) => ({ id: f.id, path: f.path, lastModified: f.lastModified ?? Date.now() })),
         );
         files.forEach((f) => queue.add(f.id));
-        const apiKey = loadApiKey();
-        if (!apiKey) {
-          store.actions.setIndexingState("paused", "Missing API key");
-          setTimeout(tick, 2000);
-          return;
-        }
         store.actions.setIndexingState("running");
 
         const batch = await indexStore.nextBatch(5);
