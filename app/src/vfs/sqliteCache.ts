@@ -1,6 +1,6 @@
-import initSqlJs from "sql.js";
 import type { Database } from "sql.js";
 import type { CacheStore } from "./cacheStore";
+import { loadSqlJs } from "../lib/sqljs";
 
 type SQLiteCacheOptions = {
   maxBytes: number;
@@ -32,7 +32,7 @@ async function persistDb(db: Database, dbName?: string) {
 }
 
 export async function createSQLiteCache(options: SQLiteCacheOptions): Promise<CacheStore> {
-  const SQL = await initSqlJs();
+  const SQL = await loadSqlJs();
   const persisted = options.persist ? await loadPersistedDb(options.dbName ?? "cache.db") : undefined;
   const db = persisted ? new SQL.Database(persisted) : new SQL.Database();
   db.run(`

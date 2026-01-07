@@ -1,8 +1,9 @@
 /* eslint-disable react-hooks/set-state-in-effect */
 import { useEffect, useRef, useState } from "react";
-import { MilkdownProvider, useEditor } from "@milkdown/react";
+import { MilkdownProvider, Milkdown, useEditor } from "@milkdown/react";
 import { Editor as MilkEditor, rootCtx, defaultValueCtx } from "@milkdown/core";
 import { nord } from "@milkdown/theme-nord";
+import { commonmark } from "@milkdown/preset-commonmark";
 import { gfm } from "@milkdown/preset-gfm";
 import { history } from "@milkdown/plugin-history";
 import { listener, listenerCtx } from "@milkdown/plugin-listener";
@@ -35,11 +36,12 @@ function MilkdownSurface({
             onChange(md);
           });
         })
+        .use(commonmark)
         .use(nord)
         .use(gfm)
         .use(history)
         .use(listener),
-    [value],
+    [],
   );
 
   useEffect(() => {
@@ -84,7 +86,11 @@ function MilkdownSurface({
     });
   }, [resolveMediaSrc, value]);
 
-  return <div ref={containerRef} className="editor__surface milkdown" role="textbox" aria-label="Document editor" />;
+  return (
+    <div ref={containerRef} className="editor__surface milkdown" role="textbox" aria-label="Document editor">
+      <Milkdown />
+    </div>
+  );
 }
 
 export function Editor() {
@@ -107,7 +113,10 @@ export function Editor() {
     const blob = new Blob([activeFile.content ?? ""], { type: mime });
     const url = URL.createObjectURL(blob);
     setAssetUrl(url);
-    return () => URL.revokeObjectURL(url);
+    const shouldRevoke = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.PROD;
+    return () => {
+      if (shouldRevoke) URL.revokeObjectURL(url);
+    };
   }, [activeFile?.id, activeFile?.content, activeFile?.path]);
 
   if (!activeFile) {

@@ -1,4 +1,4 @@
-import { test, expect } from "@playwright/test";
+import { test, expect } from "./fixtures";
 
 test.describe("App shell", () => {
   test("loads and opens command palette", async ({ page }) => {
@@ -12,11 +12,10 @@ test.describe("App shell", () => {
     await page.goto("/");
     await page.getByText("Files").waitFor({ state: "visible", timeout: 15000 });
     await page.keyboard.press("Control+K");
-    const input = page.getByPlaceholder("Search files...").first();
-    await input.waitFor({ state: "visible" });
-    await input.fill("Outside");
-    await page.getByRole("button", { name: /Outside/ }).first().click();
-    const editor = page.getByRole("textbox", { name: "Document editor" });
+    await page.getByPlaceholder("Search files...").fill("Outside");
+    await page.getByRole("button", { name: /Outside\.md/ }).click();
+    const editor = page.locator(".milkdown .ProseMirror");
+    await editor.waitFor({ state: "visible", timeout: 15000 });
     await editor.click();
     await editor.type(" update");
     await expect(page.getByText("Editing copy")).toBeVisible({ timeout: 15000 });

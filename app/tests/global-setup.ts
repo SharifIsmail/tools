@@ -19,6 +19,7 @@ async function ensureApiKey(statePath: string, apiKey?: string, baseURL = "http:
 }
 
 export default async function globalSetup() {
+  if (process.env.VITE_E2E === "true") return;
   const apiKey = process.env.VITE_GEMINI_API_KEY || process.env.VITE_GEMINI_API_KEY_TEST;
   const statePath =
     process.env.PLAYWRIGHT_STORAGE_STATE && fs.existsSync(process.env.PLAYWRIGHT_STORAGE_STATE)

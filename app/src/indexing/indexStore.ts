@@ -1,6 +1,6 @@
-import initSqlJs from "sql.js";
 import type { Database } from "sql.js";
 import type { FileRecord } from "../vfs/virtualFileSystem";
+import { loadSqlJs } from "../lib/sqljs";
 
 export type IndexEntry = {
   fileId: string;
@@ -49,7 +49,7 @@ export type IndexStore = {
 };
 
 export async function createIndexStore(options: IndexStoreOptions = {}): Promise<IndexStore> {
-  const SQL = await initSqlJs();
+  const SQL = await loadSqlJs();
   const persisted = options.persist ? await loadPersistedDb(options.dbName ?? "index.db") : undefined;
   const db = persisted ? new SQL.Database(persisted) : new SQL.Database();
   db.run(`

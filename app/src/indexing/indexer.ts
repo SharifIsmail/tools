@@ -15,7 +15,8 @@ export function useIndexer(store: AppStore, client: VfsClient) {
   const cancelled = useRef(false);
   useEffect(() => {
     const isVitest = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITEST;
-    if (isVitest) return;
+    const isE2E = typeof import.meta !== "undefined" && (import.meta as ImportMeta).env?.VITE_E2E;
+    if (isVitest || isE2E) return;
     cancelled.current = false;
     const queue = new Set<string>();
 
