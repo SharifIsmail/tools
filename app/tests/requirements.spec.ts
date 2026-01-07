@@ -1,4 +1,7 @@
 import { expect, test } from "@playwright/test";
+import fs from "fs";
+
+const hasDriveAuth = process.env.PLAYWRIGHT_STORAGE_STATE ? fs.existsSync(process.env.PLAYWRIGHT_STORAGE_STATE) : false;
 
 test.describe("Product requirements coverage", () => {
   test("wiki link disambiguation prompts for duplicates", async ({ page }) => {
@@ -32,6 +35,7 @@ test.describe("Product requirements coverage", () => {
   });
 
   test("relative links open target files", async ({ page }) => {
+    test.skip(!hasDriveAuth, "Requires authenticated Drive session");
     await page.goto("/");
     await page.getByText("Files").waitFor({ state: "visible" });
     await page.evaluate(() => {
