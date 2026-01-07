@@ -11,7 +11,7 @@ type VfsConfig = {
   appRoot: string;
   importedDir: string;
   drive: DriveAdapter;
-  cache: CacheStore<{ revision: number }>;
+  cache: CacheStore;
 };
 
 export class VirtualFileSystem {
@@ -22,7 +22,7 @@ export class VirtualFileSystem {
   }
 
   private async getRevision(id: string) {
-    const cached = await this.config.cache.get(`rev:${id}`);
+    const cached = await this.config.cache.get<{ revision: number }>(`rev:${id}`);
     if (cached?.revision) {
       return cached.revision;
     }
@@ -41,9 +41,16 @@ export class VirtualFileSystem {
   }
 
   async readFile(id: string): Promise<FileRecord> {
+    const cached = await this.config.cache.get<FileRecord>(`file:${id}`);
+    if (cached) {
+      await this.config.cache.set(`rev:${id}`, { revision: cached.revision ?? 1 });
+      return cached;
+    }
     const file = await this.config.drive.readFile(id);
     const revision = await this.getRevision(id);
-    return { ...file, revision };
+    const record = { ...file, revision };
+    await this.config.cache.set(`file:${id}`, record);
+    return record;
   }
 
   async ensureEditable(id: string): Promise<EnsureEditableResult> {
@@ -56,7 +63,9 @@ export class VirtualFileSystem {
     const copyPath = this.buildImportPath(file.path);
     const copy = await this.config.drive.createFile(copyPath, file.content, true);
     const copyRevision = await this.getRevision(copy.id);
-    return { ...copy, revision: copyRevision, isCopy: true };
+    const record = { ...copy, revision: copyRevision, isCopy: true };
+    await this.config.cache.set(`file:${record.id}`, record);
+    return record;
   }
 
   async writeFile(id: string, content: string, options: WriteOptions = {}) {
@@ -64,7 +73,9 @@ export class VirtualFileSystem {
     const overwritten = options.expectedRevision !== undefined && options.expectedRevision < currentRevision;
     const nextRevision = await this.bumpRevision(id);
     const saved = await this.config.drive.writeFile(id, content);
-    return { ...saved, revision: nextRevision, overwritten };
+    const record = { ...saved, revision: nextRevision, overwritten };
+    await this.config.cache.set(`file:${id}`, record);
+    return record;
   }
 
   private buildImportPath(originalPath: string) {

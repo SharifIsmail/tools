@@ -25,7 +25,7 @@ export function createVfsClient(): VfsClientApi {
       appRoot: APP_ROOT,
       importedDir: "Imported",
       drive: new InMemoryDrive(seedFiles),
-      cache: new InMemoryCacheStore<{ revision: number }>(),
+      cache: new InMemoryCacheStore(),
     });
     return {
       listFiles: () => vfs.listFiles(),

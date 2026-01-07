@@ -7,7 +7,7 @@ const APP_ROOT = "/MyNotes";
 
 function setup(files: FileRecord[]) {
   const drive = new InMemoryDrive(files);
-  const cache = new InMemoryCacheStore<{ revision: number }>();
+  const cache = new InMemoryCacheStore();
   const vfs = new VirtualFileSystem({
     appRoot: APP_ROOT,
     importedDir: "Imported",

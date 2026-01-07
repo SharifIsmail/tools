@@ -1,16 +1,16 @@
-export interface CacheStore<T = unknown> {
-  get(key: string): Promise<T | undefined>;
-  set(key: string, value: T): Promise<void>;
+export interface CacheStore {
+  get<T = unknown>(key: string): Promise<T | undefined>;
+  set<T = unknown>(key: string, value: T): Promise<void>;
 }
 
-export class InMemoryCacheStore<T = unknown> implements CacheStore<T> {
-  private map = new Map<string, T>();
+export class InMemoryCacheStore implements CacheStore {
+  private map = new Map<string, unknown>();
 
-  async get(key: string): Promise<T | undefined> {
-    return this.map.get(key);
+  async get<T = unknown>(key: string): Promise<T | undefined> {
+    return this.map.get(key) as T | undefined;
   }
 
-  async set(key: string, value: T): Promise<void> {
+  async set<T = unknown>(key: string, value: T): Promise<void> {
     this.map.set(key, value);
   }
 }

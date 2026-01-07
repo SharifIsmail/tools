@@ -3,6 +3,7 @@ import { VirtualFileSystem } from "../vfs/virtualFileSystem";
 import { InMemoryDrive } from "../vfs/InMemoryDrive";
 import { InMemoryCacheStore } from "../vfs/cacheStore";
 import { APP_ROOT, seedFiles } from "../vfs/sampleData";
+import { createSQLiteCache } from "../vfs/sqliteCache";
 
 type WorkerRequest =
   | { id: string; action: "list" }
@@ -15,8 +16,8 @@ type WorkerResponse =
   | { id: string; error: string };
 
 const drive = new InMemoryDrive(seedFiles);
-const cache = new InMemoryCacheStore<{ revision: number }>();
-const vfs = new VirtualFileSystem({ appRoot: APP_ROOT, importedDir: "Imported", drive, cache });
+const cachePromise = createSQLiteCache({ maxBytes: 5 * 1024 * 1024, persist: true, dbName: "vfs-cache.db" }).catch(() => new InMemoryCacheStore());
+const vfsPromise = cachePromise.then((cache) => new VirtualFileSystem({ appRoot: APP_ROOT, importedDir: "Imported", drive, cache }));
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -26,6 +27,7 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
   const respond = (response: WorkerResponse) => ctx.postMessage(response);
 
   try {
+    const vfs = await vfsPromise;
     switch (message.action) {
       case "list": {
         const files = await vfs.listFiles();
