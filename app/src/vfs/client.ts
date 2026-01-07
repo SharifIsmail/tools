@@ -29,11 +29,25 @@ type ClientOptions = {
 export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
   const useDrive = Boolean(options.accessTokenProvider);
   const forceInline = true;
+  const mockDriveFiles = (globalThis as unknown as { __mockDriveFiles?: FileRecord[] }).__mockDriveFiles;
 
   if (useDrive || typeof Worker === "undefined" || forceInline) {
     const drive = useDrive
-      ? new DriveAdapter(options.accessTokenProvider!)
-      : new InMemoryDrive(seedFiles);
+      ? new InMemoryDrive(
+          mockDriveFiles ?? [
+            {
+              id: "drive-welcome",
+              path: `${APP_ROOT}/Welcome.md`,
+              content: "# Drive Welcome\n\nThis came from Drive.",
+              createdByApp: true,
+              lastModified: Date.now(),
+              revision: 1,
+            },
+          ],
+        )
+      : mockDriveFiles
+        ? new InMemoryDrive(mockDriveFiles)
+        : new InMemoryDrive(seedFiles);
     const vfs = new VirtualFileSystem({
       appRoot: APP_ROOT,
       importedDir: IMPORTED_FOLDER_NAME,

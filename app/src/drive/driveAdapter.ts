@@ -114,7 +114,7 @@ export class DriveAdapter {
     const getPath = (file: DriveFile): string => {
       if (cache[file.id]) return cache[file.id];
       if (!file.parents || file.parents.length === 0) {
-        cache[file.id] = `/${file.name}`;
+        cache[file.id] = file.name ? `/${file.name}` : "/";
         return cache[file.id];
       }
       const parent = map.get(file.parents[0]);
@@ -123,7 +123,8 @@ export class DriveAdapter {
         return cache[file.id];
       }
       const parentPath = getPath(parent);
-      cache[file.id] = `${parentPath}/${file.name}`;
+      const sep = parentPath === "/" ? "" : "/";
+      cache[file.id] = `${parentPath}${sep}${file.name}`;
       return cache[file.id];
     };
     files.forEach((f) => getPath(f));
