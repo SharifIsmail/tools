@@ -10,6 +10,7 @@ export type VfsClient = {
   ensureEditable: (id: string) => Promise<EnsureEditableResult>;
   writeFile: (id: string, content: string, opts?: WriteOptions) => Promise<FileRecord & { overwritten?: boolean }>;
   resolvePath: (path: string, fromPath?: string) => Promise<FileRecord[]>;
+  setRevisionForTest?: (id: string, revision: number) => Promise<void>;
 };
 
 export type AppState = {

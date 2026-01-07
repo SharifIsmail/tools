@@ -32,9 +32,12 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     if (typeof window !== "undefined") {
       // Expose store for debugging and automated tests
-      (window as unknown as { __appStore?: AppStore }).__appStore = store;
+      (window as unknown as { __appStore?: AppStore; __appStoreTest?: unknown }).__appStore = store;
+      (window as unknown as { __appStoreTest?: { setRevisionForTest?: VfsClient["setRevisionForTest"] } }).__appStoreTest = {
+        setRevisionForTest: client.setRevisionForTest,
+      };
     }
-  }, [store]);
+  }, [client.setRevisionForTest, store]);
 
   return <AppContext.Provider value={{ store }}>{children}</AppContext.Provider>;
 }

@@ -37,6 +37,10 @@ export class VirtualFileSystem {
     return next;
   }
 
+  async setRevisionForTest(id: string, revision: number) {
+    await this.config.cache.set(`rev:${id}`, { revision });
+  }
+
   async listFiles() {
     return this.config.drive.listFiles();
   }

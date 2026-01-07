@@ -19,6 +19,7 @@ export interface VfsClientApi {
   ensureEditable(id: string): Promise<EnsureEditableResult>;
   writeFile(id: string, content: string, opts?: WriteOptions): Promise<FileRecord & { overwritten?: boolean }>;
   resolvePath(path: string, fromPath?: string): Promise<FileRecord[]>;
+  setRevisionForTest?: (id: string, revision: number) => Promise<void>;
 }
 
 type ClientOptions = {
@@ -27,8 +28,9 @@ type ClientOptions = {
 
 export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
   const useDrive = Boolean(options.accessTokenProvider);
+  const forceInline = true;
 
-  if (useDrive || typeof Worker === "undefined") {
+  if (useDrive || typeof Worker === "undefined" || forceInline) {
     const drive = useDrive
       ? new DriveAdapter(options.accessTokenProvider!)
       : new InMemoryDrive(seedFiles);
@@ -44,6 +46,7 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
       ensureEditable: (id) => vfs.ensureEditable(id),
       writeFile: (id, content, opts) => vfs.writeFile(id, content, opts),
       resolvePath: async (path: string, fromPath?: string) => vfs.resolvePath(path, fromPath),
+      setRevisionForTest: (id, revision) => vfs.setRevisionForTest(id, revision),
     };
   }
 
