@@ -4,6 +4,7 @@ import { VirtualFileSystem } from "./virtualFileSystem";
 import { InMemoryDrive } from "./InMemoryDrive";
 import { InMemoryCacheStore } from "./cacheStore";
 import { DriveAdapter } from "../drive/driveAdapter";
+import { IMPORTED_FOLDER_NAME } from "../config";
 import type { EnsureEditableResult, WriteOptions } from "./virtualFileSystem";
 import type { FileRecord } from "./types";
 
@@ -17,7 +18,7 @@ export interface VfsClientApi {
   readFile(id: string): Promise<FileRecord>;
   ensureEditable(id: string): Promise<EnsureEditableResult>;
   writeFile(id: string, content: string, opts?: WriteOptions): Promise<FileRecord & { overwritten?: boolean }>;
-  resolvePath(path: string): Promise<FileRecord | undefined>;
+  resolvePath(path: string, fromPath?: string): Promise<FileRecord[]>;
 }
 
 type ClientOptions = {
@@ -33,7 +34,7 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
       : new InMemoryDrive(seedFiles);
     const vfs = new VirtualFileSystem({
       appRoot: APP_ROOT,
-      importedDir: "Imported",
+      importedDir: IMPORTED_FOLDER_NAME,
       drive,
       cache: new InMemoryCacheStore(),
     });
@@ -42,11 +43,7 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
       readFile: (id) => vfs.readFile(id),
       ensureEditable: (id) => vfs.ensureEditable(id),
       writeFile: (id, content, opts) => vfs.writeFile(id, content, opts),
-      resolvePath: async (path: string) => {
-        const files = await vfs.listFiles();
-        const normalized = path.startsWith("/") ? path : `/${path}`;
-        return files.find((f) => f.path.toLowerCase() === normalized.toLowerCase());
-      },
+      resolvePath: async (path: string, fromPath?: string) => vfs.resolvePath(path, fromPath),
     };
   }
 
@@ -79,6 +76,6 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
     ensureEditable: (id: string) => call<EnsureEditableResult>("ensureEditable", { fileId: id }),
     writeFile: (id: string, content: string, opts?: WriteOptions) =>
       call<FileRecord & { overwritten?: boolean }>("write", { fileId: id, content, expectedRevision: opts?.expectedRevision }),
-    resolvePath: (path: string) => call<FileRecord | undefined>("resolvePath", { path }),
+    resolvePath: (path: string, fromPath?: string) => call<FileRecord[]>("resolvePath", { path, fromPath }),
   };
 }

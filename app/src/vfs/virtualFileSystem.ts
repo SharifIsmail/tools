@@ -1,4 +1,5 @@
 import type { CacheStore } from "./cacheStore";
+import { resolvePathMatches } from "./pathResolver";
 import type { DriveAdapter, FileRecord } from "./types";
 
 export type WriteOptions = {
@@ -76,6 +77,12 @@ export class VirtualFileSystem {
     const record = { ...saved, revision: nextRevision, overwritten };
     await this.config.cache.set(`file:${id}`, record);
     return record;
+  }
+
+  async resolvePath(path: string, fromPath?: string): Promise<FileRecord[]> {
+    const files = await this.listFiles();
+    const result = resolvePathMatches(files, path, { appRoot: this.config.appRoot, fromPath });
+    return result.matches;
   }
 
   private buildImportPath(originalPath: string) {

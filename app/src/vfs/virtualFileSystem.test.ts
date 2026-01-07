@@ -1,16 +1,17 @@
 import { describe, expect, it, beforeEach } from "vitest";
+import { APP_ROOT_PATH, IMPORTED_FOLDER_NAME } from "../config";
 import { VirtualFileSystem, type FileRecord } from "./virtualFileSystem";
 import { InMemoryDrive } from "./InMemoryDrive";
 import { InMemoryCacheStore } from "./cacheStore";
 
-const APP_ROOT = "/MyNotes";
+const APP_ROOT = APP_ROOT_PATH;
 
 function setup(files: FileRecord[]) {
   const drive = new InMemoryDrive(files);
   const cache = new InMemoryCacheStore();
   const vfs = new VirtualFileSystem({
     appRoot: APP_ROOT,
-    importedDir: "Imported",
+    importedDir: IMPORTED_FOLDER_NAME,
     drive,
     cache,
   });
@@ -46,7 +47,7 @@ describe("VirtualFileSystem", () => {
 
     const ensured = await vfs.ensureEditable("ext-1");
     expect(ensured.isCopy).toBe(true);
-    expect(ensured.path).toBe("/MyNotes/Imported/Shared/Note.md");
+    expect(ensured.path).toBe(`${APP_ROOT_PATH}/${IMPORTED_FOLDER_NAME}/Shared/Note.md`);
 
     // Write to the copy and ensure original is untouched
     await vfs.writeFile(ensured.id, "updated", { expectedRevision: ensured.revision });

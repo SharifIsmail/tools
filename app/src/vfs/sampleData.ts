@@ -1,8 +1,9 @@
+import { APP_ROOT_PATH } from "../config";
 import type { FileRecord } from "./types";
 
 const now = Date.now();
 
-export const APP_ROOT = "/MyNotes";
+export const APP_ROOT = APP_ROOT_PATH;
 
 export const seedFiles: FileRecord[] = [
   {

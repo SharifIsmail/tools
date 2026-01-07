@@ -12,7 +12,11 @@ const STORAGE_KEY = "app.oauth.tokens";
 const VERIFIER_KEY = "app.oauth.verifier";
 const STATE_KEY = "app.oauth.state";
 
-const SCOPES = ["https://www.googleapis.com/auth/drive.readonly", "https://www.googleapis.com/auth/drive.file", "https://www.googleapis.com/auth/drive.labels"];
+export const ALLOWED_SCOPES = [
+  "https://www.googleapis.com/auth/drive.readonly",
+  "https://www.googleapis.com/auth/drive.file",
+  "https://www.googleapis.com/auth/drive.labels",
+];
 
 export function loadTokens(): TokenSet | undefined {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -56,7 +60,7 @@ export function startLogin() {
       client_id: GOOGLE_CLIENT_ID,
       redirect_uri: redirectUri,
       response_type: "code",
-      scope: SCOPES.join(" "),
+      scope: ALLOWED_SCOPES.join(" "),
       access_type: "offline",
       include_granted_scopes: "true",
       prompt: "consent",

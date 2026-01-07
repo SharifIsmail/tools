@@ -1,10 +1,15 @@
 import { useEffect, useRef } from "react";
 import { createBackoff } from "../lib/backoff";
-import type { AppStore } from "../state/store";
-import type { VfsClient } from "../state/store";
+import type { AppStore, VfsClient } from "../state/store";
 import { summarizeFile } from "../ai/aiService";
+import { createIndexStore } from "./indexStore";
+import { loadApiKey } from "../ai/apiKeyStore";
 
 const backoff = createBackoff({ baseMs: 200, factor: 2, maxMs: 2000, jitterRatio: 0.2 });
+const storePromise = createIndexStore({ dbName: "ai-index.db", persist: true, maxResults: 30 }).catch((err) => {
+  console.warn("Index store init failed; falling back to in-memory", err);
+  return createIndexStore({ persist: false, maxResults: 30 });
+});
 
 export function useIndexer(store: AppStore, client: VfsClient) {
   const cancelled = useRef(false);
@@ -23,17 +28,41 @@ export function useIndexer(store: AppStore, client: VfsClient) {
       }
 
       try {
+        const indexStore = await storePromise;
         const files = await client.listFiles();
+        await indexStore.enqueueFiles(
+          files.map((f) => ({ id: f.id, path: f.path, lastModified: f.lastModified ?? Date.now() })),
+        );
         files.forEach((f) => queue.add(f.id));
+        const apiKey = loadApiKey();
+        if (!apiKey) {
+          store.actions.setIndexingState("paused", "Missing API key");
+          setTimeout(tick, 2000);
+          return;
+        }
         store.actions.setIndexingState("running");
 
-        while (queue.size > 0 && !cancelled.current) {
-          const nextId = queue.values().next().value as string;
-          queue.delete(nextId);
+        const batch = await indexStore.nextBatch(5);
+        if (batch.length === 0) {
+          store.actions.setIndexingState("idle");
+          setTimeout(tick, 3000);
+          return;
+        }
+
+        for (const nextId of batch) {
+          if (cancelled.current) break;
           const file = await client.readFile(nextId);
           try {
             if (typeof window !== "undefined") {
-              await summarizeFile(file);
+              const summary = await summarizeFile(file);
+              await indexStore.saveIndex({
+                fileId: file.id,
+                path: file.path,
+                lastModified: file.lastModified ?? Date.now(),
+                summary: summary.summary,
+                keywords: summary.keywords,
+                entities: summary.entities,
+              });
             }
           } catch (err) {
             console.warn("AI summary failed", err);
@@ -41,8 +70,7 @@ export function useIndexer(store: AppStore, client: VfsClient) {
           await new Promise((resolve) => setTimeout(resolve, 30));
         }
         backoff.reset();
-        store.actions.setIndexingState("idle");
-        setTimeout(tick, 3000);
+        setTimeout(tick, 800);
       } catch (error) {
         store.actions.setIndexingState("retrying", error instanceof Error ? error.message : String(error));
         const delay = backoff.nextDelay();

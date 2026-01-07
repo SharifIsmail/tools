@@ -5,6 +5,7 @@ import { createVfsClient } from "../vfs/client";
 import { useIndexer } from "../indexing/indexer";
 import type { FileRecord } from "../vfs/virtualFileSystem";
 import { useAuth } from "../auth/AuthContext";
+import { APP_ROOT_PATH } from "../config";
 
 type AppContextValue = {
   store: AppStore;
@@ -18,7 +19,7 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
     () => createVfsClient(auth.tokens ? { accessTokenProvider: auth.getAccessToken } : {}),
     [auth.tokens, auth.getAccessToken],
   );
-  const store = useMemo(() => createAppStore({ client, appRoot: "/MyNotes" }), [client]);
+  const store = useMemo(() => createAppStore({ client, appRoot: APP_ROOT_PATH }), [client]);
 
   useEffect(() => {
     store.actions.loadFiles().catch((err) => {

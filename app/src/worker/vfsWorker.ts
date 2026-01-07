@@ -4,13 +4,14 @@ import { InMemoryDrive } from "../vfs/InMemoryDrive";
 import { InMemoryCacheStore } from "../vfs/cacheStore";
 import { APP_ROOT, seedFiles } from "../vfs/sampleData";
 import { createSQLiteCache } from "../vfs/sqliteCache";
+import { IMPORTED_FOLDER_NAME } from "../config";
 
 type WorkerRequest =
   | { id: string; action: "list" }
   | { id: string; action: "read"; payload: { fileId: string } }
   | { id: string; action: "ensureEditable"; payload: { fileId: string } }
   | { id: string; action: "write"; payload: { fileId: string; content: string; expectedRevision?: number } }
-  | { id: string; action: "resolvePath"; payload: { path: string } };
+  | { id: string; action: "resolvePath"; payload: { path: string; fromPath?: string } };
 
 type WorkerResponse =
   | { id: string; result: unknown }
@@ -18,7 +19,9 @@ type WorkerResponse =
 
 const drive = new InMemoryDrive(seedFiles);
 const cachePromise = createSQLiteCache({ maxBytes: 5 * 1024 * 1024, persist: true, dbName: "vfs-cache.db" }).catch(() => new InMemoryCacheStore());
-const vfsPromise = cachePromise.then((cache) => new VirtualFileSystem({ appRoot: APP_ROOT, importedDir: "Imported", drive, cache }));
+const vfsPromise = cachePromise.then(
+  (cache) => new VirtualFileSystem({ appRoot: APP_ROOT, importedDir: IMPORTED_FOLDER_NAME, drive, cache }),
+);
 
 const ctx: DedicatedWorkerGlobalScope = self as unknown as DedicatedWorkerGlobalScope;
 
@@ -53,10 +56,8 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
         break;
       }
       case "resolvePath": {
-        const files = await vfs.listFiles();
-        const normalized = message.payload.path.startsWith("/") ? message.payload.path : `/${message.payload.path}`;
-        const target = files.find((f) => f.path.toLowerCase() === normalized.toLowerCase());
-        respond({ id: message.id, result: target });
+        const matches = await vfs.resolvePath(message.payload.path, message.payload.fromPath);
+        respond({ id: message.id, result: matches });
         break;
       }
       default: {

@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { FileRecord } from "../vfs/virtualFileSystem";
+import { APP_ROOT_PATH } from "../config";
 import { useAppActions, useAppStoreSelector } from "../state/AppContext";
 
 type TreeNode = {
@@ -86,8 +87,8 @@ function TreeNodeView({ node, expanded, toggle }: { node: TreeNode; expanded: Se
 
 export function Sidebar() {
   const files = useAppStoreSelector((s) => s.files);
-  const [expanded, setExpanded] = useState<Set<string>>(new Set(["/MyNotes"]));
-  const tree = useMemo(() => buildTree(files, "/MyNotes"), [files]);
+  const [expanded, setExpanded] = useState<Set<string>>(new Set([APP_ROOT_PATH]));
+  const tree = useMemo(() => buildTree(files, APP_ROOT_PATH), [files]);
 
   const toggle = (path: string) => {
     setExpanded((prev) => {

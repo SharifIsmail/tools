@@ -4,6 +4,7 @@ import { AppProvider, useAppStoreSelector } from "./state/AppContext";
 import { Sidebar } from "./components/Sidebar";
 import { Editor } from "./components/Editor";
 import { CommandPalette } from "./components/CommandPalette";
+import { LinkDisambiguation } from "./components/LinkDisambiguation";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
 import { loadApiKey, saveApiKey } from "./ai/apiKeyStore";
 
@@ -51,6 +52,7 @@ function Shell() {
         <StatusBar />
       </main>
       <CommandPalette />
+      <LinkDisambiguation />
     </div>
   );
 }

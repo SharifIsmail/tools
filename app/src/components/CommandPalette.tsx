@@ -1,12 +1,15 @@
 import { useEffect, useMemo, useState } from "react";
+import { APP_ROOT_PATH } from "../config";
 import { useAppActions, useAppStoreSelector } from "../state/AppContext";
+import { createIndexStore, type IndexEntry } from "../indexing/indexStore";
 
-const APP_ROOT = "/MyNotes";
+const indexStorePromise = createIndexStore({ dbName: "ai-index.db", persist: true, maxResults: 15 });
 
 export function CommandPalette() {
   const actions = useAppActions();
   const { files, ui } = useAppStoreSelector((s) => ({ files: s.files, ui: s.ui }));
   const [query, setQuery] = useState("");
+  const [indexResults, setIndexResults] = useState<IndexEntry[]>([]);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -21,16 +24,43 @@ export function CommandPalette() {
     return () => window.removeEventListener("keydown", onKey);
   }, [actions, ui.commandPaletteOpen]);
 
+  useEffect(() => {
+    let cancelled = false;
+    const run = async () => {
+      const trimmed = query.trim();
+      if (!trimmed) {
+        setIndexResults([]);
+        return;
+      }
+      const store = await indexStorePromise;
+      const results = await store.search(trimmed);
+      if (!cancelled) setIndexResults(results);
+    };
+    run();
+    return () => {
+      cancelled = true;
+    };
+  }, [query]);
+
   const results = useMemo(() => {
     const lower = query.toLowerCase();
-    return files
+    const fileMatches = files
       .filter((file) => file.path.toLowerCase().includes(lower))
       .slice(0, 15)
       .map((file) => ({
         ...file,
-        external: !file.path.startsWith(APP_ROOT),
+        external: !file.path.startsWith(APP_ROOT_PATH),
       }));
-  }, [files, query]);
+    const extraFromIndex = indexResults
+      .filter((entry) => !fileMatches.some((f) => f.id === entry.fileId))
+      .map((entry) => ({
+        id: entry.fileId,
+        path: entry.path,
+        summary: entry.summary,
+        external: !entry.path.startsWith(APP_ROOT_PATH),
+      }));
+    return [...fileMatches, ...extraFromIndex];
+  }, [files, indexResults, query]);
 
   if (!ui.commandPaletteOpen) return null;
 
@@ -55,7 +85,10 @@ export function CommandPalette() {
               }}
             >
               <span>{file.path}</span>
-              {file.external && <span className="palette__badge">External</span>}
+              <span className="palette__meta">
+                {file.summary && <span className="palette__summary">{file.summary.slice(0, 80)}</span>}
+                {file.external && <span className="palette__badge">External</span>}
+              </span>
             </button>
           ))}
           {results.length === 0 && <div className="palette__empty">No matches</div>}
