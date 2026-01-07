@@ -4,6 +4,7 @@ import { createAppStore, type AppStore } from "./store";
 import { createVfsClient } from "../vfs/client";
 import { useIndexer } from "../indexing/indexer";
 import type { FileRecord } from "../vfs/virtualFileSystem";
+import { useAuth } from "../auth/AuthContext";
 
 type AppContextValue = {
   store: AppStore;
@@ -12,7 +13,11 @@ type AppContextValue = {
 const AppContext = createContext<AppContextValue | null>(null);
 
 export function AppProvider({ children }: { children: React.ReactNode }) {
-  const client = useMemo(() => createVfsClient(), []);
+  const auth = useAuth();
+  const client = useMemo(
+    () => createVfsClient(auth.tokens ? { accessTokenProvider: auth.getAccessToken } : {}),
+    [auth.tokens, auth.getAccessToken],
+  );
   const store = useMemo(() => createAppStore({ client, appRoot: "/MyNotes" }), [client]);
 
   useEffect(() => {

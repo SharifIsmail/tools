@@ -3,6 +3,7 @@ import { APP_ROOT, seedFiles } from "./sampleData";
 import { VirtualFileSystem } from "./virtualFileSystem";
 import { InMemoryDrive } from "./InMemoryDrive";
 import { InMemoryCacheStore } from "./cacheStore";
+import { DriveAdapter } from "../drive/driveAdapter";
 import type { EnsureEditableResult, WriteOptions } from "./virtualFileSystem";
 import type { FileRecord } from "./types";
 
@@ -18,13 +19,21 @@ export interface VfsClientApi {
   writeFile(id: string, content: string, opts?: WriteOptions): Promise<FileRecord & { overwritten?: boolean }>;
 }
 
-export function createVfsClient(): VfsClientApi {
-  if (typeof Worker === "undefined") {
-    // Vitest/SSR fallback: run VFS locally
+type ClientOptions = {
+  accessTokenProvider?: () => Promise<string | undefined>;
+};
+
+export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
+  const useDrive = Boolean(options.accessTokenProvider);
+
+  if (useDrive || typeof Worker === "undefined") {
+    const drive = useDrive
+      ? new DriveAdapter(options.accessTokenProvider!)
+      : new InMemoryDrive(seedFiles);
     const vfs = new VirtualFileSystem({
       appRoot: APP_ROOT,
       importedDir: "Imported",
-      drive: new InMemoryDrive(seedFiles),
+      drive,
       cache: new InMemoryCacheStore(),
     });
     return {

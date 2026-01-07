@@ -63,7 +63,11 @@ export function createAppStore(config: StoreConfig) {
       store.setState((state) => ({
         ...state,
         activeFile: file,
-        ui: { ...state.ui, copyIndicator: false, lastSaveOverwritten: false },
+        ui: {
+          ...state.ui,
+          copyIndicator: !file.createdByApp || !file.path.startsWith(config.appRoot),
+          lastSaveOverwritten: false,
+        },
       }));
     },
     saveContent: async (content: string) => {
@@ -76,7 +80,8 @@ export function createAppStore(config: StoreConfig) {
       }));
 
       let target = current;
-      if (!current.createdByApp || !current.path.startsWith(config.appRoot)) {
+      const needsCopy = !current.createdByApp || !current.path.startsWith(config.appRoot);
+      if (needsCopy) {
         const ensured = await config.client.ensureEditable(current.id);
         target = ensured;
         store.setState((state) => ({
@@ -84,6 +89,8 @@ export function createAppStore(config: StoreConfig) {
           activeFile: ensured,
           ui: { ...state.ui, copyIndicator: ensured.isCopy },
         }));
+      } else {
+        store.setState((state) => ({ ...state, ui: { ...state.ui, copyIndicator: false } }));
       }
 
       const result = await config.client.writeFile(target.id, content, { expectedRevision: target.revision });

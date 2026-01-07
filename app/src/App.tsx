@@ -3,6 +3,7 @@ import { AppProvider, useAppStoreSelector } from "./state/AppContext";
 import { Sidebar } from "./components/Sidebar";
 import { Editor } from "./components/Editor";
 import { CommandPalette } from "./components/CommandPalette";
+import { AuthProvider, useAuth } from "./auth/AuthContext";
 
 function StatusBar() {
   const active = useAppStoreSelector((s) => s.activeFile);
@@ -18,10 +19,22 @@ function StatusBar() {
 }
 
 function Shell() {
+  const { tokens, login, logout, loading } = useAuth();
   return (
     <div className="app-shell">
       <Sidebar />
       <main className="main">
+        <div className="auth-bar">
+          {tokens ? (
+            <button className="auth-btn" onClick={logout} disabled={loading}>
+              Sign out
+            </button>
+          ) : (
+            <button className="auth-btn" onClick={login} disabled={loading}>
+              Sign in with Google
+            </button>
+          )}
+        </div>
         <Editor />
         <StatusBar />
       </main>
@@ -32,8 +45,10 @@ function Shell() {
 
 export default function App() {
   return (
-    <AppProvider>
-      <Shell />
-    </AppProvider>
+    <AuthProvider>
+      <AppProvider>
+        <Shell />
+      </AppProvider>
+    </AuthProvider>
   );
 }
