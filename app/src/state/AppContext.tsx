@@ -29,6 +29,13 @@ export function AppProvider({ children }: { children: React.ReactNode }) {
 
   useIndexer(store, client);
 
+  useEffect(() => {
+    if (typeof window !== "undefined") {
+      // Expose store for debugging and automated tests
+      (window as unknown as { __appStore?: AppStore }).__appStore = store;
+    }
+  }, [store]);
+
   return <AppContext.Provider value={{ store }}>{children}</AppContext.Provider>;
 }
 
