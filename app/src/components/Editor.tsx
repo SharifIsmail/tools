@@ -16,16 +16,21 @@ import { APP_ROOT_PATH } from "../config";
 
 function MilkdownSurface({
   value,
+  fileId,
+  mode,
   onChange,
   onLinkNavigate,
   resolveMediaSrc,
 }: {
   value: string;
+  fileId: string;
+  mode: "wysiwyg" | "source";
   onChange: (md: string) => void;
   onLinkNavigate: (href: string) => void;
   resolveMediaSrc: (src: string) => string;
 }) {
   const containerRef = useRef<HTMLDivElement | null>(null);
+  const lastApplied = useRef<string>("");
   const editor = useEditor(
     (root) =>
       MilkEditor.make()
@@ -33,6 +38,7 @@ function MilkdownSurface({
           ctx.set(rootCtx, root);
           ctx.set(defaultValueCtx, value);
           ctx.get(listenerCtx).markdownUpdated((_, md) => {
+            lastApplied.current = md;
             onChange(md);
           });
         })
@@ -47,8 +53,18 @@ function MilkdownSurface({
   useEffect(() => {
     const instance = editor.get();
     if (!instance) return;
+    lastApplied.current = value;
     instance.action(replaceAll(value));
-  }, [editor, value]);
+  }, [editor, fileId]);
+
+  useEffect(() => {
+    if (mode !== "wysiwyg") return;
+    if (value === lastApplied.current) return;
+    const instance = editor.get();
+    if (!instance) return;
+    lastApplied.current = value;
+    instance.action(replaceAll(value));
+  }, [editor, mode, value]);
 
   useEffect(() => {
     const node = containerRef.current;
@@ -173,6 +189,8 @@ export function Editor() {
           mode === "wysiwyg" ? (
             <MilkdownSurface
               value={encodeWikiLinks(draft)}
+              fileId={activeFile.id}
+              mode={mode}
               onLinkNavigate={handleLinkNavigate}
               resolveMediaSrc={resolveMediaSrc}
               onChange={(md) => {

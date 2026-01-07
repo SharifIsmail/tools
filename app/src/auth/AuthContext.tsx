@@ -16,21 +16,24 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 export function AuthProvider({ children }: { children: React.ReactNode }) {
   const [tokens, setTokens] = useState<TokenSet | undefined>(() => loadTokens());
   const [loading, setLoading] = useState(false);
+  const [handledCallback, setHandledCallback] = useState(false);
 
   useEffect(() => {
+    if (handledCallback) return;
     if (window.location.pathname === "/auth/callback") {
       setLoading(true);
       handleAuthCallback()
         .then((next) => setTokens(next))
         .finally(() => {
           setLoading(false);
+          setHandledCallback(true);
           const cleaned = new URL(window.location.href);
           cleaned.search = "";
           cleaned.pathname = "/";
           window.history.replaceState({}, "", cleaned.toString());
         });
     }
-  }, []);
+  }, [handledCallback]);
 
   const getAccessTokenMemo = useCallback(async () => {
     const token = await getValidAccessToken();

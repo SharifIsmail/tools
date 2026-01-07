@@ -78,8 +78,9 @@ export async function handleAuthCallback(): Promise<TokenSet | undefined> {
   const state = url.searchParams.get("state");
   if (!code) return undefined;
   const { verifier, state: expectedState } = consumeVerifier();
-  if (!verifier || state !== expectedState) {
-    throw new Error("Invalid OAuth state");
+  if (!verifier || !state || state !== expectedState) {
+    console.warn("Invalid OAuth state; skipping token exchange");
+    return undefined;
   }
   const redirectUri = `${window.location.origin}/auth/callback`;
   const body = new URLSearchParams({
