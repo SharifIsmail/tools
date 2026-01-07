@@ -17,6 +17,7 @@ export interface VfsClientApi {
   readFile(id: string): Promise<FileRecord>;
   ensureEditable(id: string): Promise<EnsureEditableResult>;
   writeFile(id: string, content: string, opts?: WriteOptions): Promise<FileRecord & { overwritten?: boolean }>;
+  resolvePath(path: string): Promise<FileRecord | undefined>;
 }
 
 type ClientOptions = {
@@ -41,6 +42,11 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
       readFile: (id) => vfs.readFile(id),
       ensureEditable: (id) => vfs.ensureEditable(id),
       writeFile: (id, content, opts) => vfs.writeFile(id, content, opts),
+      resolvePath: async (path: string) => {
+        const files = await vfs.listFiles();
+        const normalized = path.startsWith("/") ? path : `/${path}`;
+        return files.find((f) => f.path.toLowerCase() === normalized.toLowerCase());
+      },
     };
   }
 
@@ -73,5 +79,6 @@ export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
     ensureEditable: (id: string) => call<EnsureEditableResult>("ensureEditable", { fileId: id }),
     writeFile: (id: string, content: string, opts?: WriteOptions) =>
       call<FileRecord & { overwritten?: boolean }>("write", { fileId: id, content, expectedRevision: opts?.expectedRevision }),
+    resolvePath: (path: string) => call<FileRecord | undefined>("resolvePath", { path }),
   };
 }

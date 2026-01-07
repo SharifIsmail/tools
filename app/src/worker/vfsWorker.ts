@@ -9,7 +9,8 @@ type WorkerRequest =
   | { id: string; action: "list" }
   | { id: string; action: "read"; payload: { fileId: string } }
   | { id: string; action: "ensureEditable"; payload: { fileId: string } }
-  | { id: string; action: "write"; payload: { fileId: string; content: string; expectedRevision?: number } };
+  | { id: string; action: "write"; payload: { fileId: string; content: string; expectedRevision?: number } }
+  | { id: string; action: "resolvePath"; payload: { path: string } };
 
 type WorkerResponse =
   | { id: string; result: unknown }
@@ -49,6 +50,13 @@ ctx.onmessage = async (event: MessageEvent<WorkerRequest>) => {
           expectedRevision: message.payload.expectedRevision,
         });
         respond({ id: message.id, result: saved });
+        break;
+      }
+      case "resolvePath": {
+        const files = await vfs.listFiles();
+        const normalized = message.payload.path.startsWith("/") ? message.payload.path : `/${message.payload.path}`;
+        const target = files.find((f) => f.path.toLowerCase() === normalized.toLowerCase());
+        respond({ id: message.id, result: target });
         break;
       }
       default: {

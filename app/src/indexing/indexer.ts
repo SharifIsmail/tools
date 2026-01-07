@@ -2,6 +2,7 @@ import { useEffect, useRef } from "react";
 import { createBackoff } from "../lib/backoff";
 import type { AppStore } from "../state/store";
 import type { VfsClient } from "../state/store";
+import { summarizeFile } from "../ai/aiService";
 
 const backoff = createBackoff({ baseMs: 200, factor: 2, maxMs: 2000, jitterRatio: 0.2 });
 
@@ -29,7 +30,14 @@ export function useIndexer(store: AppStore, client: VfsClient) {
         while (queue.size > 0 && !cancelled.current) {
           const nextId = queue.values().next().value as string;
           queue.delete(nextId);
-          await client.readFile(nextId); // simulate crawl
+          const file = await client.readFile(nextId);
+          try {
+            if (typeof window !== "undefined") {
+              await summarizeFile(file);
+            }
+          } catch (err) {
+            console.warn("AI summary failed", err);
+          }
           await new Promise((resolve) => setTimeout(resolve, 30));
         }
         backoff.reset();

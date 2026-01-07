@@ -9,7 +9,16 @@ import { listener, listenerCtx } from "@milkdown/plugin-listener";
 import { replaceAll } from "@milkdown/utils";
 import { useActiveFile, useAppActions, useAppStoreSelector } from "../state/AppContext";
 
-function MilkdownSurface({ value, onChange }: { value: string; onChange: (md: string) => void }) {
+function MilkdownSurface({
+  value,
+  onChange,
+  onLinkNavigate,
+}: {
+  value: string;
+  onChange: (md: string) => void;
+  onLinkNavigate: (href: string) => void;
+}) {
+  const containerRef = useRef<HTMLDivElement | null>(null);
   const editor = useEditor(
     (root) =>
       MilkEditor.make()
@@ -33,7 +42,25 @@ function MilkdownSurface({ value, onChange }: { value: string; onChange: (md: st
     instance.action(replaceAll(value));
   }, [editor, value]);
 
-  return <div className="editor__surface milkdown" role="textbox" aria-label="Document editor" />;
+  useEffect(() => {
+    const node = containerRef.current;
+    if (!node) return;
+    const handler = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+      const anchor = target.closest("a") as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const href = anchor.getAttribute("href");
+      if (!href) return;
+      if (/^https?:\/\//i.test(href)) return;
+      event.preventDefault();
+      onLinkNavigate(href);
+    };
+    node.addEventListener("click", handler);
+    return () => node.removeEventListener("click", handler);
+  }, [onLinkNavigate]);
+
+  return <div ref={containerRef} className="editor__surface milkdown" role="textbox" aria-label="Document editor" />;
 }
 
 export function Editor() {
@@ -51,6 +78,30 @@ export function Editor() {
   if (!activeFile) {
     return <div className="editor__empty">Select a file to start</div>;
   }
+
+  const ext = activeFile.path.split(".").pop()?.toLowerCase();
+
+  const resolveLink = (href: string) => {
+    const currentPath = activeFile.path;
+    if (href.startsWith("/")) return href;
+    // wiki link like [[Note]] -> convert to slug search
+    if (/^wiki:/.test(href)) return href.slice(5);
+    const baseParts = currentPath.split("/").slice(0, -1);
+    const hrefParts = href.split("/");
+    const stack = [...baseParts];
+    hrefParts.forEach((part) => {
+      if (part === "." || part === "") return;
+      if (part === "..") stack.pop();
+      else stack.push(part);
+    });
+    return `/${stack.join("/")}`;
+  };
+
+  const handleLinkNavigate = (href: string) => {
+    const targetPath = resolveLink(href);
+    if (!targetPath) return;
+    actions.openByPath(targetPath);
+  };
 
   const scheduleSave = (content: string) => {
     if (saveTimer.current) clearTimeout(saveTimer.current);
@@ -84,15 +135,27 @@ export function Editor() {
           </div>
           <div className="editor__status">{ui.saving ? "Saving..." : "Saved"}</div>
         </header>
-        {mode === "wysiwyg" ? (
-          <MilkdownSurface
-            value={draft}
-            onChange={(md) => {
-              setDraft(md);
-              scheduleSave(md);
-            }}
-          />
-        ) : (
+        {ext === "md" ? (
+          mode === "wysiwyg" ? (
+            <MilkdownSurface
+              value={draft}
+              onLinkNavigate={handleLinkNavigate}
+              onChange={(md) => {
+                setDraft(md);
+                scheduleSave(md);
+              }}
+            />
+          ) : (
+            <textarea
+              className="editor__textarea"
+              value={draft}
+              onChange={(e) => {
+                setDraft(e.target.value);
+                scheduleSave(e.target.value);
+              }}
+            />
+          )
+        ) : ext === "txt" ? (
           <textarea
             className="editor__textarea"
             value={draft}
@@ -101,6 +164,10 @@ export function Editor() {
               scheduleSave(e.target.value);
             }}
           />
+        ) : (
+          <div className="editor__preview-placeholder">
+            Preview not supported. <button onClick={() => alert("Download from Drive not yet implemented")}>Download</button>
+          </div>
         )}
       </section>
     </MilkdownProvider>

@@ -1,9 +1,11 @@
 import "./App.css";
+import { useEffect, useState } from "react";
 import { AppProvider, useAppStoreSelector } from "./state/AppContext";
 import { Sidebar } from "./components/Sidebar";
 import { Editor } from "./components/Editor";
 import { CommandPalette } from "./components/CommandPalette";
 import { AuthProvider, useAuth } from "./auth/AuthContext";
+import { loadApiKey, saveApiKey } from "./ai/apiKeyStore";
 
 function StatusBar() {
   const active = useAppStoreSelector((s) => s.activeFile);
@@ -20,6 +22,10 @@ function StatusBar() {
 
 function Shell() {
   const { tokens, login, logout, loading } = useAuth();
+  const [apiKey, setApiKey] = useState(() => loadApiKey() ?? "");
+  useEffect(() => {
+    if (apiKey) saveApiKey(apiKey);
+  }, [apiKey]);
   return (
     <div className="app-shell">
       <Sidebar />
@@ -34,6 +40,12 @@ function Shell() {
               Sign in with Google
             </button>
           )}
+          <input
+            className="auth-input"
+            placeholder="Gemini API Key"
+            value={apiKey}
+            onChange={(e) => setApiKey(e.target.value)}
+          />
         </div>
         <Editor />
         <StatusBar />

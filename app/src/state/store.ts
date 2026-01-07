@@ -6,6 +6,7 @@ export type VfsClient = {
   readFile: (id: string) => Promise<FileRecord>;
   ensureEditable: (id: string) => Promise<EnsureEditableResult>;
   writeFile: (id: string, content: string, opts?: WriteOptions) => Promise<FileRecord & { overwritten?: boolean }>;
+  resolvePath: (path: string) => Promise<FileRecord | undefined>;
 };
 
 export type AppState = {
@@ -24,6 +25,7 @@ export type AppState = {
 export type AppActions = {
   loadFiles: () => Promise<void>;
   openFile: (id: string) => Promise<void>;
+  openByPath: (path: string) => Promise<void>;
   saveContent: (content: string) => Promise<void>;
   setCommandPalette: (open: boolean) => void;
   setIndexingState: (status: AppState["ui"]["indexingStatus"], error?: string) => void;
@@ -57,6 +59,16 @@ export function createAppStore(config: StoreConfig) {
       if (firstAppFile) {
         await actions.openFile(firstAppFile.id);
       }
+    },
+    openByPath: async (path: string) => {
+      const normalized = path.startsWith("/") ? path : `/${path}`;
+      const direct = store.getState().files.find((f) => f.path.toLowerCase() === normalized.toLowerCase());
+      if (direct) {
+        await actions.openFile(direct.id);
+        return;
+      }
+      const resolved = await config.client.resolvePath(normalized);
+      if (resolved) await actions.openFile(resolved.id);
     },
     openFile: async (id: string) => {
       const file = await config.client.readFile(id);
