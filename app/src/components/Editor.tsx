@@ -193,21 +193,25 @@ export function Editor() {
           />
         ) : ["png", "jpg", "jpeg", "gif", "webp", "svg"].includes(ext ?? "") ? (
           <div className="editor__preview-placeholder">
-            <img src={assetUrl ?? buildImagePlaceholder(activeFile.path)} alt={activeFile.path} className="editor__preview-img" />
-            <a className="download-btn" href={assetUrl} download>
+            <img
+              src={activeFile.downloadUrl ?? assetUrl ?? buildImagePlaceholder(activeFile.path)}
+              alt={activeFile.path}
+              className="editor__preview-img"
+            />
+            <a className="download-btn" href={activeFile.downloadUrl ?? assetUrl} download>
               Download image
             </a>
           </div>
         ) : ext === "pdf" ? (
           <div className="editor__preview-placeholder">
             {assetUrl ? (
-              <object data={assetUrl} type="application/pdf" className="editor__pdf">
-                <a href={assetUrl} download>
+              <object data={activeFile.downloadUrl ?? assetUrl} type="application/pdf" className="editor__pdf">
+                <a href={activeFile.downloadUrl ?? assetUrl} download>
                   Download PDF
                 </a>
               </object>
             ) : (
-              <a className="download-btn" href={assetUrl ?? "#"} download>
+              <a className="download-btn" href={activeFile.downloadUrl ?? assetUrl ?? "#"} download>
                 Download PDF
               </a>
             )}
@@ -215,7 +219,7 @@ export function Editor() {
         ) : (
           <div className="editor__preview-placeholder">
             <div>Preview not supported.</div>
-            <a className="download-btn" href={assetUrl} download>
+            <a className="download-btn" href={activeFile.downloadUrl ?? assetUrl} download>
               Download file
             </a>
           </div>

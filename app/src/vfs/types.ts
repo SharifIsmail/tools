@@ -5,6 +5,8 @@ export type FileRecord = {
   createdByApp: boolean;
   lastModified: number;
   revision?: number;
+  mimeType?: string;
+  downloadUrl?: string;
 };
 
 export type DriveAdapter = {

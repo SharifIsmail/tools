@@ -25,9 +25,14 @@ export class DriveAdapter {
     this.tokenProvider = tokenProvider;
   }
 
-  private async authHeaders() {
+  private async getAccessToken(): Promise<string> {
     const token = await this.tokenProvider();
     if (!token) throw new Error("Not authenticated");
+    return token;
+  }
+
+  private async authHeaders() {
+    const token = await this.getAccessToken();
     return {
       Authorization: `Bearer ${token}`,
     };
@@ -142,6 +147,7 @@ export class DriveAdapter {
 
   async readFile(id: string): Promise<FileRecord> {
     const headers = await this.authHeaders();
+    const token = await this.getAccessToken();
     const res = await fetch(`https://www.googleapis.com/drive/v3/files/${id}?alt=media`, { headers });
     if (!res.ok) throw new Error(`Failed to read file ${id}`);
     const content = await res.text();
@@ -157,11 +163,14 @@ export class DriveAdapter {
       content,
       createdByApp: meta.appProperties?.createdByApp === "true",
       lastModified: meta.modifiedTime ? Date.parse(meta.modifiedTime) : Date.now(),
+      mimeType: meta.mimeType,
+      downloadUrl: `https://www.googleapis.com/drive/v3/files/${id}?alt=media&access_token=${encodeURIComponent(token)}`,
     };
   }
 
   async writeFile(id: string, content: string): Promise<FileRecord> {
     const headers = await this.authHeaders();
+    const token = await this.getAccessToken();
     const metadataRes = await fetch(
       `https://www.googleapis.com/drive/v3/files/${id}?fields=id,name,mimeType,parents,modifiedTime,appProperties`,
       { headers },
@@ -193,11 +202,14 @@ export class DriveAdapter {
       content,
       createdByApp: meta.appProperties?.createdByApp === "true",
       lastModified: updatedMeta.modifiedTime ? Date.parse(updatedMeta.modifiedTime) : Date.now(),
+      mimeType: updatedMeta.mimeType,
+      downloadUrl: `https://www.googleapis.com/drive/v3/files/${id}?alt=media&access_token=${encodeURIComponent(token)}`,
     };
   }
 
   async createFile(path: string, content: string, createdByApp: boolean): Promise<FileRecord> {
     const headers = await this.authHeaders();
+    const token = await this.getAccessToken();
     const parts = path.split("/").filter(Boolean);
     const fileName = parts.pop()!;
     const parentPath = parts.join("/");
@@ -234,6 +246,8 @@ export class DriveAdapter {
       content,
       createdByApp,
       lastModified: Date.now(),
+      mimeType: created.mimeType,
+      downloadUrl: `https://www.googleapis.com/drive/v3/files/${created.id}?alt=media&access_token=${encodeURIComponent(token)}`,
     };
   }
 
