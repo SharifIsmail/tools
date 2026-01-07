@@ -107,7 +107,13 @@ classDiagram
 *   **Developer C (UI/State)**: Build `Sidebar`, `CommandPalette`, and connect to `State Store`.
 *   **Developer D (AI/Index)**: Implement `IndexService` logic and `AIService` integration.
 
-## 4. Indexing Strategy
+## 4. Concurrency & Workers
+
+*   **Worker Isolation**: Run `VirtualFileSystem` and `IndexService` inside a dedicated WebWorker to keep Drive and SQLite work off the main thread.
+*   **SQLite Access**: Maintain a single SQLite connection in the worker (wa-sqlite + OPFS), with a serialized job queue for writes to avoid locking issues.
+*   **Async API**: Expose async, message-based methods (`list/read/write/index`) from worker to UI; UI must not perform blocking storage operations on the main thread.
+
+## 5. Indexing Strategy
 
 To fulfill the "Whole Drive" indexing requirement scalably on the client-side, the system uses a **Keyword & Entity Extraction** approach stored in **SQLite FTS5**.
 
@@ -133,4 +139,3 @@ When the user queries via Command Palette:
 1.  **Local Search**: Runs SQL query: `SELECT module FROM fts_index WHERE fts_index MATCH ?`.
 2.  **Ranking**: SQLite FTS5 `rank` function.
 3.  **Result**: Returns instant results.
-
