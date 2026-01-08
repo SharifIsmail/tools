@@ -1,6 +1,6 @@
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useEffect, useMemo, useSyncExternalStore } from "react";
-import { createAppStore, type AppStore } from "./store";
+import { createAppStore, type AppStore, type VfsClient } from "./store";
 import { createVfsClient } from "../vfs/client";
 import { useIndexer } from "../indexing/indexer";
 import type { FileRecord } from "../vfs/virtualFileSystem";

@@ -10,6 +10,7 @@ export function CommandPalette() {
   const { files, ui } = useAppStoreSelector((s) => ({ files: s.files, ui: s.ui }));
   const [query, setQuery] = useState("");
   const [indexResults, setIndexResults] = useState<IndexEntry[]>([]);
+  type PaletteResult = { id: string; path: string; external: boolean; summary?: string };
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent) => {
@@ -44,14 +45,15 @@ export function CommandPalette() {
 
   const results = useMemo(() => {
     const lower = query.toLowerCase();
-    const fileMatches = files
+    const fileMatches: PaletteResult[] = files
       .filter((file) => file.path.toLowerCase().includes(lower))
       .slice(0, 15)
       .map((file) => ({
-        ...file,
+        id: file.id,
+        path: file.path,
         external: !file.path.startsWith(APP_ROOT_PATH),
       }));
-    const extraFromIndex = indexResults
+    const extraFromIndex: PaletteResult[] = indexResults
       .filter((entry) => !fileMatches.some((f) => f.id === entry.fileId))
       .map((entry) => ({
         id: entry.fileId,

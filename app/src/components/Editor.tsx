@@ -51,8 +51,8 @@ const MilkdownSurface = ({
             onChange(md);
           });
         })
+        .config(nord)
         .use(commonmark)
-        .use(nord)
         .use(gfm)
         .use(history)
         .use(listener),

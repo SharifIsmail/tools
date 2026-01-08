@@ -3,7 +3,6 @@ import { APP_ROOT, seedFiles } from "./sampleData";
 import { VirtualFileSystem } from "./virtualFileSystem";
 import { InMemoryDrive } from "./InMemoryDrive";
 import { InMemoryCacheStore } from "./cacheStore";
-import { DriveAdapter } from "../drive/driveAdapter";
 import { IMPORTED_FOLDER_NAME } from "../config";
 import type { EnsureEditableResult, WriteOptions } from "./virtualFileSystem";
 import type { FileRecord } from "./types";
