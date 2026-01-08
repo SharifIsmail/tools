@@ -107,7 +107,13 @@ classDiagram
 *   **Developer C (UI/State)**: Build `Sidebar`, `CommandPalette`, and connect to `State Store`.
 *   **Developer D (AI/Index)**: Implement `IndexService` logic and `AIService` integration.
 
-## 4. Indexing Strategy
+## 4. Concurrency & Workers
+
+*   **Worker Isolation**: Run `VirtualFileSystem` and `IndexService` inside a dedicated WebWorker to keep Drive and SQLite work off the main thread.
+*   **SQLite Access**: Maintain a single SQLite connection in the worker (wa-sqlite + OPFS), with a serialized job queue for writes to avoid locking issues.
+*   **Async API**: Expose async, message-based methods (`list/read/write/index`) from worker to UI; UI must not perform blocking storage operations on the main thread.
+
+## 5. Indexing Strategy
 
 To fulfill the "Whole Drive" indexing requirement scalably on the client-side, the system uses a **Keyword & Entity Extraction** approach stored in **SQLite FTS5**.
 
@@ -133,98 +139,4 @@ When the user queries via Command Palette:
 1.  **Local Search**: Runs SQL query: `SELECT module FROM fts_index WHERE fts_index MATCH ?`.
 2.  **Ranking**: SQLite FTS5 `rank` function.
 3.  **Result**: Returns instant results.
-
-## 5. Core Data Contracts (TypeScript)
-
-To enable parallel development, all developers **MUST** adhere to these strict interfaces. These types will be published in a shared `@types` package.
-
-```typescript
-/**
- * Represents a file or folder in the Virtual File System.
- * Corresponds to a row in the SQLite 'files' table.
- */
-export interface FileSystemItem {
-  id: string;          // Google Drive ID
-  parentId: string | null; 
-  name: string;
-  type: 'file' | 'folder';
-  mimeType: string;
-  lastModified: number; // Unix Timestamp
-  size?: number;
-  // Note: Content is NOT loaded by default in list views
-}
-
-/**
- * The unified API exposed by the VFS Worker (via Comlink).
- * UI components interact ONLY with this interface.
- */
-export interface IVirtualFileSystem {
-  // --- Queries (Optimized for SQLite execution) ---
-  /**
-   * Returns children of a folder.
-   * fast-path: Query SQLite.
-   * slow-path: If folder is 'stale', sync with Drive.
-   */
-  listFiles(parentId: string): Promise<FileSystemItem[]>;
-
-  /**
-   * Reads full file content.
-   * fast-path: Return cached content from SQLite/OPFS.
-   * slow-path: Fetch from Drive, update Cache, return.
-   */
-  readFile(id: string): Promise<string>;
-
-  // --- Mutations (Write-through pattern) ---
-  /**
-   * Writes content to a file.
-   * 1. Update SQLite content (Immediate UI feedback)
-   * 2. Queue background upload to Drive
-   */
-  writeFile(id: string, content: string): Promise<void>;
-
-  /**
-   * Creates a new file/folder.
-   */
-  createItem(name: string, parentId: string, type: 'file' | 'folder'): Promise<FileSystemItem>;
-
-  /**
-   * "Copy on Edit" logic helper.
-   */
-  createCopy(sourceId: string, targetParentId: string): Promise<FileSystemItem>;
-
-  // --- Maintenance ---
-  /**
-   * Forces a full backup of the SQLite DB to Google Drive
-   */
-  exportDatabase(): Promise<void>;
-}
-
-/**
- * The API exposed by the Index Service (Worker).
- */
-export interface IIndexService {
-  /**
-   * FTS5 Full Text Search against SQLite.
-   */
-  search(query: string): Promise<SearchResult[]>;
-
-  /**
-   * Returns crawler status for UI indicators.
-   */
-  getStatus(): Promise<{ 
-    indexedCount: number; 
-    queueSize: number; 
-    status: 'idle' | 'crawling' | 'indexing' 
-  }>;
-}
-
-export interface SearchResult {
-  fileId: string;
-  path: string;
-  title: string;
-  snippet: string; // Context around the keyword match
-  score: number;   // FTS5 rank
-  matchType: 'title' | 'content' | 'entity';
-}
-```
 
