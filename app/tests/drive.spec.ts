@@ -3,6 +3,10 @@ import { test, expect } from "./fixtures";
 test.describe("Drive integration (mocked)", () => {
   test("loads files from Drive adapter when access token present", async ({ page }) => {
     await page.addInitScript((token, driveFiles) => {
+      // Force mock drive client path even though tokens exist.
+      // @ts-expect-error test flag
+      window.__forceMockDrive = true;
+      localStorage.setItem("app.mock.driveFiles", JSON.stringify(driveFiles));
       localStorage.setItem(
         "app.oauth.tokens",
         JSON.stringify({
@@ -42,6 +46,7 @@ test.describe("Drive integration (mocked)", () => {
 
     await page.evaluate(() => {
       localStorage.removeItem("app.oauth.tokens");
+      localStorage.removeItem("app.mock.driveFiles");
       // @ts-expect-error cleanup mock
       delete window.__mockDriveFiles;
     });

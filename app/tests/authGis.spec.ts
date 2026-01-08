@@ -3,6 +3,9 @@ import { test, expect } from "./fixtures";
 test.describe("Google Identity Services auth", () => {
   test("signs in and stores token via GIS", async ({ page }) => {
     await page.addInitScript(() => {
+      // Force Drive to stay mocked during auth flow.
+      // @ts-expect-error test flag
+      window.__forceMockDrive = true;
       const tokenResponse = {
         access_token: "playwright-token",
         expires_in: 3600,

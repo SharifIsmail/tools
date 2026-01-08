@@ -4,6 +4,7 @@ import { VirtualFileSystem } from "./virtualFileSystem";
 import { InMemoryDrive } from "./InMemoryDrive";
 import { InMemoryCacheStore } from "./cacheStore";
 import { IMPORTED_FOLDER_NAME } from "../config";
+import { DriveAdapter } from "../drive/driveAdapter";
 import type { EnsureEditableResult, WriteOptions } from "./virtualFileSystem";
 import type { FileRecord } from "./types";
 
@@ -26,24 +27,36 @@ type ClientOptions = {
 };
 
 export function createVfsClient(options: ClientOptions = {}): VfsClientApi {
-  const useDrive = Boolean(options.accessTokenProvider);
+  const forceMock = Boolean((globalThis as unknown as { __forceMockDrive?: boolean }).__forceMockDrive);
+  const useDrive = Boolean(options.accessTokenProvider) && !forceMock;
   const forceInline = true;
-  const mockDriveFiles = (globalThis as unknown as { __mockDriveFiles?: FileRecord[] }).__mockDriveFiles;
+  let mockDriveFiles = (globalThis as unknown as { __mockDriveFiles?: FileRecord[] }).__mockDriveFiles;
+  if (!mockDriveFiles && typeof localStorage !== "undefined") {
+    try {
+      const stored = localStorage.getItem("app.mock.driveFiles");
+      if (stored) mockDriveFiles = JSON.parse(stored) as FileRecord[];
+    } catch {
+      mockDriveFiles = undefined;
+    }
+  }
+  if (!mockDriveFiles && forceMock) {
+    mockDriveFiles = [
+      {
+        id: "drive-welcome",
+        path: `${APP_ROOT}/Welcome.md`,
+        content: "# Drive Welcome\n\nSeeded mock drive file.",
+        createdByApp: true,
+        lastModified: Date.now(),
+        revision: 1,
+      },
+    ];
+  }
 
   if (useDrive || typeof Worker === "undefined" || forceInline) {
     const drive = useDrive
-      ? new InMemoryDrive(
-          mockDriveFiles ?? [
-            {
-              id: "drive-welcome",
-              path: `${APP_ROOT}/Welcome.md`,
-              content: "# Drive Welcome\n\nThis came from Drive.",
-              createdByApp: true,
-              lastModified: Date.now(),
-              revision: 1,
-            },
-          ],
-        )
+      ? mockDriveFiles
+        ? new InMemoryDrive(mockDriveFiles)
+        : new DriveAdapter(options.accessTokenProvider!)
       : mockDriveFiles
         ? new InMemoryDrive(mockDriveFiles)
         : new InMemoryDrive(seedFiles);

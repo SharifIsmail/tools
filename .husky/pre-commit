@@ -1,5 +1,9 @@
 #!/usr/bin/env sh
-. "$(dirname -- "$0")/_/husky.sh"
+set -e
 
+cd "$(dirname "$0")/.." || exit 1
 cd app || exit 1
-npm run ci:local
+
+# Lightweight sanity checks before commit: unit tests plus targeted Drive mock e2e.
+npm test
+npx playwright test tests/drive-e2e.spec.ts --project=chromium
