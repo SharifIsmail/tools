@@ -1,42 +1,7 @@
 import { test, expect } from "./fixtures";
 
-type DriveFile = {
-  id: string;
-  name: string;
-  mimeType: string;
-  parents?: string[];
-  appProperties?: Record<string, string>;
-  modifiedTime?: string;
-  content?: string;
-};
-
 test.describe("Drive integration (mocked)", () => {
   test("loads files from Drive adapter when access token present", async ({ page }) => {
-    const files: Record<string, DriveFile> = {
-      root: { id: "root", name: "", mimeType: "application/vnd.google-apps.folder" },
-      rootNotes: { id: "root-notes", name: "MyNotes", mimeType: "application/vnd.google-apps.folder", parents: ["root"] },
-      imported: {
-        id: "imported",
-        name: "Imported",
-        mimeType: "application/vnd.google-apps.folder",
-        parents: ["root-notes"],
-      },
-      appState: {
-        id: "app-state",
-        name: ".app_state",
-        mimeType: "application/vnd.google-apps.folder",
-        parents: ["root-notes"],
-      },
-      welcome: {
-        id: "drive-welcome",
-        name: "Welcome.md",
-        mimeType: "text/markdown",
-        parents: ["root-notes"],
-        appProperties: { createdByApp: "true" },
-        content: "# Drive Welcome\n\nThis came from Drive.",
-      },
-    };
-
     await page.addInitScript((token, driveFiles) => {
       localStorage.setItem(
         "app.oauth.tokens",

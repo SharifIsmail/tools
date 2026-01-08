@@ -10,7 +10,7 @@ test.describe("Google Identity Services auth", () => {
       };
       // @ts-expect-error inject mock GIS token client
       window.__mockGisClient = {
-        callback: (_resp: unknown) => {},
+        callback: () => {},
         requestAccessToken: ({ prompt }: { prompt?: string }) => {
           if (prompt === "consent" || prompt === undefined || prompt === "") {
             // @ts-expect-error use latest callback

@@ -1,6 +1,11 @@
 import { defineConfig, devices } from "@playwright/test";
 import fs from "fs";
 import path from "path";
+import dotenv from "dotenv";
+
+// Load env for local runs so live Gemini tests can use .env/.env.local
+dotenv.config({ path: path.join(process.cwd(), ".env") });
+dotenv.config({ path: path.join(process.cwd(), ".env.local") });
 
 process.env.VITE_E2E = process.env.VITE_E2E ?? "true";
 

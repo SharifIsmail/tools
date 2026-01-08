@@ -162,7 +162,7 @@ export function Editor() {
 
   useEffect(() => {
     setDraft(decodeWikiLinks(activeFile?.content ?? ""));
-  }, [activeFile?.id, activeFile?.content]);
+  }, [activeFile]);
 
   useEffect(() => {
     if (!activeFile) return;
@@ -174,7 +174,7 @@ export function Editor() {
     return () => {
       if (shouldRevoke) URL.revokeObjectURL(url);
     };
-  }, [activeFile?.id, activeFile?.content, activeFile?.path]);
+  }, [activeFile]);
 
   const syncFromEditor = useCallback(async () => {
     return draft;

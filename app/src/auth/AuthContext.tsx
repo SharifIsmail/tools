@@ -1,4 +1,3 @@
-/* eslint-disable react-hooks/set-state-in-effect */
 /* eslint-disable react-refresh/only-export-components */
 import { createContext, useContext, useMemo, useState, useCallback } from "react";
 import { loadTokens, logout, startLogin, type TokenSet, getValidAccessToken } from "./auth";

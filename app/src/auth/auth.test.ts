@@ -10,7 +10,9 @@ type MockTokenResponse = {
 
 function mockGis(response: MockTokenResponse) {
   const tokenClient = {
-    callback: (_resp: MockTokenResponse) => {},
+    callback: (resp?: MockTokenResponse) => {
+      void resp;
+    },
     requestAccessToken: vi.fn(() => {
       // simulate async callback
       tokenClient.callback(response);

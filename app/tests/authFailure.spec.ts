@@ -5,7 +5,7 @@ test.describe("OAuth callback failure", () => {
     await page.addInitScript(() => {
       // @ts-expect-error inject mock GIS token client
       window.__mockGisClient = {
-        callback: (_resp: unknown) => {},
+        callback: () => {},
         requestAccessToken: () => {
           // @ts-expect-error use latest callback
           window.__mockGisClient.callback({ error: "access_denied" });

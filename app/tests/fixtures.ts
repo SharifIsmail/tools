@@ -19,7 +19,7 @@ function isAllowed(list: RegExp[] | undefined, value: string) {
 export const test = base.extend<AllowList>({
   allowedHttpErrors: undefined,
   allowedConsoleErrors: undefined,
-  page: async ({ page, allowedHttpErrors, allowedConsoleErrors }, use) => {
+  page: async ({ page, allowedHttpErrors, allowedConsoleErrors }, runWithPage) => {
     const errors: string[] = [];
     page.on("console", (msg) => {
       if (msg.type() === "error") {
@@ -40,7 +40,7 @@ export const test = base.extend<AllowList>({
         }
       }
     });
-    await use(page as Page);
+    await runWithPage(page as Page);
     expect(errors, errors.join("\n")).toEqual([]);
   },
 });
