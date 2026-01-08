@@ -12,6 +12,7 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 | **REQ-SEC-01** | The application **MUST NOT** request the sensitive `https://www.googleapis.com/auth/drive` (full access) scope. | Inspect OAuth config code. |
 | **REQ-SEC-02** | The application **MAY** request ONLY: `drive.readonly` (all files), `drive.file` (created by app), and `drive.labels`. | Inspect OAuth config code. |
 | **REQ-SEC-03** | The application must operate using only the permitted scopes. | Authenticate app and verify consent screen lists only allowed scopes. |
+| **NOTE-SEC-LAUNCH** | OAuth launch is **internal-only** initially; external verification deferred until feature-complete. See `oauth_launch_plan.md`. | Confirm OAuth client is set to Internal/Testing and users are whitelisted only. |
 
 ### 2.2 Architecture
 
@@ -26,11 +27,12 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 
 | ID | Requirement | Verification Method |
 | :--- | :--- | :--- |
-| **REQ-PERF-01** | **Optimistic UI**: Every user interaction **MUST** result in visual feedback/state change within **20ms**. | DevTools Performance: Measure time from `Input` to next `Paint`. Must be ≤ 20ms. |
+| **REQ-PERF-01** | **Optimistic UI**: Every user interaction **MUST** show visible feedback within **50–80ms** on modern laptops and **≤150ms** on mid-tier devices for cached/hot-path interactions. | DevTools Performance: Measure time from `Input` to next `Paint` on a warmed app. 90th percentile must be ≤80ms on modern laptops, ≤150ms on mid-tier devices. |
 | **REQ-PERF-02** | **Caching**: The application **MUST** implement an aggressive caching and prefetching strategy. | Check network tab for prefetching activity. |
-| **REQ-PERF-03** | **Speed**: **95%** of navigations **MUST** resolve using cached/prefetched data within **20ms**. | Perform 20 random navigations. 19/20 must load instantly (<20ms) without network blocking. |
+| **REQ-PERF-03** | **Speed**: **90%** of navigations **MUST** resolve using cached/prefetched data within **≤80ms** on modern laptops and **≤150ms** on mid-tier devices. | Perform 20 random navigations after warm start. 18/20 must load within the stated bounds without network blocking. |
 | **REQ-PERF-04** | **Persistence**: Cache **MUST** be persisted to **SQLite (via OPFS/WASM)** to ensure high-performance query capability and offline availability. | Reload page. Query via Console `SELECT * FROM cache`. Check persistence. |
 | **REQ-PERF-05** | **Eviction Policy**: Cache **MUST** enforce a **Developer-Configurable TOTAL** size limit (in MB) using an **LRU** eviction policy implemented via SQL. | Set limit 1MB. Insert 2MB blobs. Verify `count(*)` decreases to maintain usage limits. |
+| **NOTE-PERF-FALLBACK** | Fallbacks for environments without OPFS/SQLite are **out of scope for initial release**; add later once core app is stable. | N/A |
 
 ## 4. Functional Requirements
 
@@ -63,10 +65,12 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 | **REQ-EDIT-01** | **WYSIWYG**: The application **MUST** provide a WYSIWYG Markdown editing experience (e.g., via Milkdown or ProseMirror). | Verify rich text editing (bold, list) happens in-place without manual markdown syntax unless desired. |
 | **REQ-EDIT-02** | **View Modes**: Users **MUST** be able to switch between WYSIWYG (default) and Raw Source mode. | Toggle view mode. Verify underlying markdown text is visible/editable directly. |
 | **REQ-EDIT-03** | **Mobile**: The editor interface **MUST** be fully functional on mobile devices (touch targets, responsiveness). | Load on mobile emulation. Verify text entry and formatting tools work. |
-| **REQ-EDIT-04** | **Concurrency**: File saving **MUST** use a "Last Write Wins" strategy. | Open file in two tabs. Save Tab A, then Tab B. Verify Tab B overwrites A. |
+| **REQ-EDIT-04** | **Concurrency**: File saving **MUST** use a "Last Write Wins" strategy and show a warning/toast when a save loses to a newer version, offering to reopen the latest. | Open file in two tabs. Save Tab A, then Tab B. Verify Tab B overwrites A and Tab A sees warning with reopen option. |
 | **REQ-EDIT-05** | **Extended Syntax**: The editor **SHOULD** support extended syntax (Mermaid, LaTeX, Footnotes) where possible, but this is **OPTIONAL** for V1. | Create doc with Mermaid diagram. Verify rendering (if implemented) or graceful degradation. |
 | **REQ-EDIT-06** | **Autosave**: Edits to text/markdown files **MUST** be autosaved to Drive automatically (e.g. after 1s debounce or on blur). | Type in editor. Wait. Reload page. Verify changes persisted without manual save. |
-| **REQ-EDIT-07** | **Copy-on-Edit**: If the user edits a read-only file (e.g. outside **App Root Folder**), the app **MUST** automatically create a writable copy in the **App Root Folder** (e.g. `/MyNotes/Imported`) and save changes there. | Open file from outside `/MyNotes`. Edit it. Verify original is untouched. Verify new file with changes exists in `/MyNotes`. |
+| **REQ-EDIT-07** | **Copy-on-Edit**: If the user edits a read-only file (e.g. outside **App Root Folder**), the app **MUST** automatically create a writable copy in the **App Root Folder** mirroring the original path (e.g. `/MyNotes/Imported/<original-path>`) and save all edits there. | Open file from outside `/MyNotes`. Edit it. Verify original is untouched. Verify new file with changes exists in `/MyNotes/Imported/<original-path>`. |
+| **REQ-EDIT-08** | **Rename/Move Scope**: Renames and moves **MUST** occur only within the **App Root Folder**; originals outside remain unchanged. | Attempt to rename/move file opened from outside `/MyNotes`. Verify action is blocked or happens on the copied version only. |
+| **REQ-EDIT-09** | **Copy Indicator**: UI **MUST** clearly label when a user is editing a copy vs. the original (e.g., banner/tag). | Open external file, trigger copy-on-edit, and verify a visible indicator shows “Editing copy” in the editor header. |
 
 ## 5. Hosting
 
@@ -82,6 +86,8 @@ The goal is to build a note-taking, personal organizer, self-leadership, and per
 | **REQ-AI-02** | **Indexing Strategy**: App **MUST** build a search index for the **Entire Drive** by extracting **Keywords, Entities, and Summaries** (not full embeddings) via AI. | Add file in random folder. Wait for crawler. Verify file keywords appear in App State index. |
 | **REQ-AI-03** | **API Key Security**: Users **MUST** be able to input API keys safely (e.g., stored in LocalStorage/Session, never committed or shared). | input API key. Reload. Verify key persists locally but is not synced to Drive file content. |
 | **REQ-AI-04** | **Background Crawling**: The indexing process **MUST** run in the background (step-by-step), maintaining a persistent queue of un-indexed files to process in parallel batches. | Open app. Verify UI is responsive while "Indexing" indicator is active. Close/Reopen app. Verify indexing resumes where left off. |
+| **REQ-AI-05** | **Resilient Crawling**: Indexing and AI calls **MUST** implement retry with exponential backoff + jitter on errors/rate limits, pausing when offline and resuming when online, without artificial daily caps. | Simulate transient 429/5xx or offline. Verify retries back off (e.g., up to ~2 minutes), pause offline, and resume successfully. |
+| **REQ-AI-06** | **Retry Feedback**: When retries are in progress, the UI **MUST** show a non-blocking indicator (e.g., “Retrying…”) and surface a clear error/toast if max retries are exceeded. | Force repeated failures. Verify user sees retry state and an error when retries stop. |
 
 ## 7. UI & UX
 
