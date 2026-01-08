@@ -10,6 +10,7 @@ jobs:
     runs-on: ubuntu-latest
     env:
       VITE_GEMINI_API_KEY: ${{ secrets.VITE_GEMINI_API_KEY }}
+      VITE_GOOGLE_CLIENT_ID: ${{ secrets.VITE_GOOGLE_CLIENT_ID }}
     defaults:
       run:
         working-directory: app
