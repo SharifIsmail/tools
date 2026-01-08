@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 
 // Load env for local runs so live Gemini tests can use .env/.env.local
 dotenv.config({ path: path.join(process.cwd(), ".env") });
-dotenv.config({ path: path.join(process.cwd(), ".env.local") });
+dotenv.config({ path: path.join(process.cwd(), ".env.local"), override: true }); // allow .env.local to override defaults
 
 process.env.VITE_E2E = process.env.VITE_E2E ?? "true";
 

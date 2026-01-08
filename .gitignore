@@ -139,5 +139,7 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+# Playwright/Vitest outputs
+app/test-results/
 # Firebase storage state file
 storageState.withKey.json
