@@ -78,6 +78,10 @@ function trackAuthDebug(message: string) {
 
 function ensureGisScript(): Promise<void> {
   if (scriptPromise) return scriptPromise;
+  if (typeof window !== "undefined" && (window as GisWindow).__mockGisClient) {
+    scriptPromise = Promise.resolve();
+    return scriptPromise;
+  }
   if (typeof window !== "undefined" && (window as GisWindow).google?.accounts?.oauth2) {
     scriptPromise = Promise.resolve();
     return scriptPromise;
